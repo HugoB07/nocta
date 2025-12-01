@@ -109,16 +109,6 @@ void nc_module_zero_grad(nc_module* m);
 void nc_module_requires_grad_(nc_module* m, bool requires_grad);
 
 // ============================================
-// Serialization
-// ============================================
-
-// Save module state to file
-nc_error nc_module_save(nc_module* m, const char* path);
-
-// Load module state from file
-nc_error nc_module_load(nc_module* m, const char* path);
-
-// ============================================
 // Debug
 // ============================================
 

@@ -11,6 +11,7 @@
 #include "nocta/core/error.h"
 #include "nocta/core/memory.h"
 #include "nocta/core/tensor.h"
+#include "nocta/core/serialize.h"
 
 // ============================================
 // Autograd

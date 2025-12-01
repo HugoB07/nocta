@@ -10,6 +10,7 @@ Nocta provides PyTorch-like functionality with automatic differentiation, tensor
 - **Automatic Differentiation**: Dynamic computation graph with backpropagation
 - **Neural Network Modules**: Linear layers, activations (ReLU, Sigmoid, Tanh, Softmax, GELU, etc.)
 - **Optimizers**: SGD (with momentum, Nesterov), Adam, AdamW
+- **Serialization**: Save/load tensors, models, and training checkpoints in custom .ncta format
 - **Memory Efficient**: Reference-counted storage, aligned allocations, detailed memory tracking
 - **Cross-Platform**: Works on Windows (MSVC), Linux (GCC), and macOS (Clang)
 - **Zero Dependencies**: No external libraries required
@@ -186,13 +187,44 @@ nc_optimizer_step(opt);
 nc_optimizer_free(opt);
 ```
 
+### Serialization
+
+```c
+// Save/load single tensor
+nc_tensor_save(tensor, "weights.ncta");
+nc_tensor* loaded = nc_tensor_load("weights.ncta");
+
+// Save/load model
+nc_module_save(model, "model.ncta");
+nc_module_load(model, "model.ncta");
+
+// State dict (PyTorch-style)
+nc_state_dict* sd = nc_module_state_dict(model);
+nc_state_dict_save(sd, "checkpoint.ncta");
+nc_state_dict* loaded_sd = nc_state_dict_load("checkpoint.ncta");
+
+// Training checkpoints
+nc_checkpoint ckpt = {
+    .model_state = nc_module_state_dict(model),
+    .optimizer_state = optimizer_state_dict,
+    .epoch = 100,
+    .loss = 0.001
+};
+nc_checkpoint_save(&ckpt, "training.ncta");
+nc_checkpoint* loaded = nc_checkpoint_load("training.ncta");
+
+// File utilities
+nc_file_info("model.ncta");           // Print file contents
+bool valid = nc_file_verify("model.ncta");  // Verify integrity
+```
+
 ## Project Structure
 
 ```
 nocta/
 ├── include/nocta/
 │   ├── nocta.h          # Main header
-│   ├── core/            # Tensor, memory, types
+│   ├── core/            # Tensor, memory, types, serialization
 │   ├── autograd/        # Automatic differentiation
 │   ├── ops/             # Operations (arithmetic, matmul, activations)
 │   ├── nn/              # Neural network modules
@@ -213,10 +245,10 @@ Memory leaks:    0 bytes
 
 ## Roadmap
 
+- [x] Model serialization (save/load tensors, modules, checkpoints)
 - [ ] Convolution layers (Conv2D, MaxPool)
 - [ ] Batch normalization
 - [ ] Dropout
-- [ ] Model serialization (save/load)
 - [ ] SIMD optimizations (AVX2/AVX512)
 - [ ] GPU support (OpenCL/CUDA)
 

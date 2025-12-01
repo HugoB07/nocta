@@ -32,6 +32,7 @@ endif()
 set(NOCTA_SOURCES
     src/core/tensor.c
     src/core/memory.c
+    src/core/serialize.c
     src/autograd/node.c
     src/autograd/backward.c
     src/ops/arithmetic.c
@@ -64,4 +65,7 @@ endif()
 if(NOCTA_BUILD_EXAMPLES)
     add_executable(example_xor examples/xor.c)
     target_link_libraries(example_xor PRIVATE nocta)
+    
+    add_executable(example_save_load examples/save_load.c)
+    target_link_libraries(example_save_load PRIVATE nocta)
 endif()
