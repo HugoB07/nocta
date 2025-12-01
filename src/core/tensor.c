@@ -1,4 +1,5 @@
 #include "nocta/core/tensor.h"
+#include "nocta/autograd/node.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -344,7 +345,7 @@ double nc_tensor_get(const nc_tensor* t, const size_t* indices) {
         case NC_F32: return ((float*)ptr)[0];
         case NC_F64: return ((double*)ptr)[0];
         case NC_I32: return ((int32_t*)ptr)[0];
-        case NC_I64: return ((int64_t*)ptr)[0];
+        case NC_I64: { int64_t val = ((int64_t*)ptr)[0]; return (double)val; }
         case NC_U8:  return ((uint8_t*)ptr)[0];
         default: return 0.0;
     }

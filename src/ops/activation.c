@@ -1,4 +1,5 @@
 #include "nocta/ops/activation.h"
+#include "nocta/ops/arithmetic.h"
 #include "nocta/autograd/node.h"
 #include "nocta/autograd/backward.h"
 #include <math.h>
