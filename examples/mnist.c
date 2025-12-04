@@ -313,6 +313,7 @@ int main(int argc, char** argv) {
         test = load_mnist(argv[3], argv[4]);
     }
     if (!train) {
+        if (test) free_mnist(test);
         printf("Using synthetic data. For real MNIST:\n");
         printf("  %s train-images train-labels test-images test-labels\n\n", argv[0]);
         train = create_synthetic(100);  // Smaller for testing
@@ -326,7 +327,7 @@ int main(int argc, char** argv) {
     
     // Training
     double lr = 0.01;
-    size_t epochs = 2, batch_size = 16;  // Smaller batch
+    size_t epochs = 2, batch_size = 32;  // Smaller batch
     printf("Training: lr=%.3f, batch=%zu, epochs=%zu\n\n", lr, batch_size, epochs);
     
     for (size_t e = 0; e < epochs; e++) {
