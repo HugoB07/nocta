@@ -2,6 +2,7 @@
 #define NOCTA_NODE_H
 
 #include "nocta/core/tensor.h"
+#include <stdbool.h>
 
 #define NC_MAX_INPUTS 8
 
@@ -25,6 +26,7 @@ struct nc_node {
     
     // Saved tensors for backward (e.g., inputs needed for gradient)
     nc_tensor* saved_tensors[NC_MAX_INPUTS];
+    bool saved_tensors_owned[NC_MAX_INPUTS]; // Whether node owns the tensor (should free it)
     size_t n_saved;
     
     // Output (weak reference, not owned)
@@ -43,6 +45,9 @@ void nc_node_add_input(nc_node* node, nc_tensor* input);
 
 // Save tensor for backward
 void nc_node_save_tensor(nc_node* node, nc_tensor* t);
+
+// Save tensor for backward and take ownership (will be freed with node)
+void nc_node_save_owned_tensor(nc_node* node, nc_tensor* t);
 
 // Free node
 void nc_node_free(nc_node* node);
@@ -76,5 +81,9 @@ nc_tensor** nc_backward_mean(nc_tensor* grad, nc_tensor** inputs, size_t n);
 nc_tensor** nc_backward_pow(nc_tensor* grad, nc_tensor** inputs, size_t n);
 nc_tensor** nc_backward_exp(nc_tensor* grad, nc_tensor** inputs, size_t n);
 nc_tensor** nc_backward_log(nc_tensor* grad, nc_tensor** inputs, size_t n);
+
+// Convolution
+nc_tensor** nc_backward_conv2d(nc_tensor* grad, nc_tensor** inputs, size_t n);
+nc_tensor** nc_backward_maxpool2d(nc_tensor* grad, nc_tensor** inputs, size_t n);
 
 #endif // NOCTA_NODE_H

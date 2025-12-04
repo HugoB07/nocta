@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(nocta VERSION 0.1.0 LANGUAGES C)
+project(nocta VERSION 0.2.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -39,8 +39,10 @@ set(NOCTA_SOURCES
     src/ops/matmul.c
     src/ops/activation.c
     src/ops/reduction.c
+    src/ops/loss.c
     src/nn/module.c
     src/nn/linear.c
+    src/nn/conv.c
     src/optim/optimizer.c
     src/optim/sgd.c
     src/optim/adam.c
@@ -68,4 +70,7 @@ if(NOCTA_BUILD_EXAMPLES)
     
     add_executable(example_save_load examples/save_load.c)
     target_link_libraries(example_save_load PRIVATE nocta)
+    
+    add_executable(example_mnist examples/mnist.c)
+    target_link_libraries(example_mnist PRIVATE nocta)
 endif()

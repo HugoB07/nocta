@@ -4,6 +4,8 @@
 #include "nocta/nn/module.h"
 #include "nocta/ops/matmul.h"
 #include "nocta/ops/arithmetic.h"
+#include "nocta/ops/reduction.h"
+#include "nocta/autograd/backward.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +27,36 @@ typedef struct {
     bool has_bias;
 } nc_linear_data;
 
+// Backward function for Linear
+static nc_tensor** nc_backward_linear(nc_tensor* grad, nc_tensor** saved, size_t n) {
+    (void)n;
+    nc_tensor** grads = nc_calloc(3, sizeof(nc_tensor*)); // input, weight, bias
+    if (!grads) return NULL;
+
+    nc_tensor* input = saved[0];
+    nc_tensor* weight = saved[1];
+    nc_tensor* bias = saved[2];
+
+    // dL/dInput = grad @ weight
+    if (input && input->requires_grad) {
+        grads[0] = nc_matmul(grad, weight);
+    }
+
+    // dL/dWeight = grad^T @ input
+    if (weight && weight->requires_grad) {
+        nc_tensor* gt = nc_tensor_t(grad);
+        grads[1] = nc_matmul(gt, input);
+        nc_tensor_free(gt);
+    }
+
+    // dL/dBias = sum(grad, 0)
+    if (bias && bias->requires_grad) {
+        grads[2] = nc_sum(grad, 0, false);
+    }
+
+    return grads;
+}
+
 // Forward pass: y = x @ W^T + b
 static nc_tensor* linear_forward(nc_module* self, nc_tensor* input) {
     nc_tensor* weight = nc_module_get_param(self, "weight");
@@ -32,21 +64,45 @@ static nc_tensor* linear_forward(nc_module* self, nc_tensor* input) {
     
     if (!weight || !input) return NULL;
     
+    // Compute in no_grad mode to avoid intermediate nodes
+    nc_no_grad_guard guard = nc_no_grad_begin();
+    
     // Weight is (out_features, in_features), need to transpose
     nc_tensor* wt = nc_tensor_t(weight);
-    if (!wt) return NULL;
+    if (!wt) { nc_no_grad_end(&guard); return NULL; }
     
     // x @ W^T
     nc_tensor* out = nc_matmul(input, wt);
     nc_tensor_free(wt);
     
-    if (!out) return NULL;
-    
-    // Add bias if present
-    if (bias) {
+    if (out && bias) {
         nc_tensor* out_bias = nc_add(out, bias);
         nc_tensor_free(out);
         out = out_bias;
+    }
+    
+    nc_no_grad_end(&guard);
+    
+    if (!out) return NULL;
+    
+    // Manually setup autograd
+    if (nc_grad_enabled() && (input->requires_grad || weight->requires_grad || (bias && bias->requires_grad))) {
+        out->requires_grad = true;
+        out->is_leaf = false;
+        
+        nc_node* node = nc_node_create("Linear", nc_backward_linear);
+        if (node) {
+            nc_node_add_input(node, input);
+            nc_node_add_input(node, weight);
+            if (bias) nc_node_add_input(node, bias);
+            
+            nc_node_save_tensor(node, input);
+            nc_node_save_tensor(node, weight);
+            nc_node_save_tensor(node, bias);
+            
+            node->output = out;
+            out->grad_fn = node;
+        }
     }
     
     return out;

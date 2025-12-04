@@ -1,0 +1,510 @@
+#include "nocta/nn/conv.h"
+#include "nocta/core/memory.h"
+#include "nocta/autograd/node.h"
+#include "nocta/autograd/backward.h"
+#include <math.h>
+#include <string.h>
+#include <stdlib.h>
+
+// ============================================
+// Conv2D Extra Data
+// ============================================
+
+typedef struct {
+    size_t in_channels;
+    size_t out_channels;
+    size_t kernel_size;
+    size_t stride;
+    size_t padding;
+    bool has_bias;
+} nc_conv2d_data;
+
+// ============================================
+// Conv2D Backward
+// ============================================
+
+nc_tensor** nc_backward_conv2d(nc_tensor* grad, nc_tensor** saved, size_t n) {
+    (void)n;
+    nc_tensor** grads = nc_calloc(3, sizeof(nc_tensor*));
+    if (!grads) return NULL;
+    
+    nc_tensor* input = saved[0];    // (N, C_in, H, W)
+    nc_tensor* weight = saved[1];   // (C_out, C_in, kH, kW)
+    nc_tensor* bias = saved[2];     // (C_out,) or NULL
+    nc_tensor* stride_t = saved[3]; // scalar
+    nc_tensor* padding_t = saved[4]; // scalar
+    
+    size_t stride = (size_t)nc_tensor_get_flat(stride_t, 0);
+    size_t padding = (size_t)nc_tensor_get_flat(padding_t, 0);
+    
+    size_t N = input->shape[0];
+    size_t C_in = input->shape[1];
+    size_t H = input->shape[2];
+    size_t W = input->shape[3];
+    size_t C_out = weight->shape[0];
+    size_t kH = weight->shape[2];
+    size_t kW = weight->shape[3];
+    
+    size_t H_out = (H + 2*padding - kH) / stride + 1;
+    size_t W_out = (W + 2*padding - kW) / stride + 1;
+    
+    // Gradient w.r.t input
+    grads[0] = nc_tensor_zeros(input->shape, input->ndim, input->dtype);
+    
+    // Gradient w.r.t weight
+    grads[1] = nc_tensor_zeros(weight->shape, weight->ndim, weight->dtype);
+    
+    // Gradient w.r.t bias (if present)
+    if (bias) {
+        grads[2] = nc_tensor_zeros(bias->shape, bias->ndim, bias->dtype);
+        // dL/db = sum over (N, H_out, W_out) of grad
+        for (size_t c = 0; c < C_out; c++) {
+            double sum = 0.0;
+            for (size_t b = 0; b < N; b++) {
+                for (size_t h = 0; h < H_out; h++) {
+                    for (size_t w = 0; w < W_out; w++) {
+                        sum += nc_tensor_get4(grad, b, c, h, w);
+                    }
+                }
+            }
+            nc_tensor_set1(grads[2], c, sum);
+        }
+    }
+    
+    // Compute gradients
+    for (size_t b = 0; b < N; b++) {
+        for (size_t c_out = 0; c_out < C_out; c_out++) {
+            for (size_t h_out = 0; h_out < H_out; h_out++) {
+                for (size_t w_out = 0; w_out < W_out; w_out++) {
+                    double grad_val = nc_tensor_get4(grad, b, c_out, h_out, w_out);
+                    
+                    for (size_t c_in = 0; c_in < C_in; c_in++) {
+                        for (size_t kh = 0; kh < kH; kh++) {
+                            for (size_t kw = 0; kw < kW; kw++) {
+                                int h_in = (int)(h_out * stride + kh) - (int)padding;
+                                int w_in = (int)(w_out * stride + kw) - (int)padding;
+                                
+                                if (h_in >= 0 && h_in < (int)H && 
+                                    w_in >= 0 && w_in < (int)W) {
+                                    // dL/dW
+                                    double inp = nc_tensor_get4(input, b, c_in, h_in, w_in);
+                                    double cur_dw = nc_tensor_get4(grads[1], c_out, c_in, kh, kw);
+                                    nc_tensor_set4(grads[1], c_out, c_in, kh, kw, 
+                                                   cur_dw + grad_val * inp);
+                                    
+                                    // dL/dX
+                                    double w = nc_tensor_get4(weight, c_out, c_in, kh, kw);
+                                    double cur_dx = nc_tensor_get4(grads[0], b, c_in, h_in, w_in);
+                                    nc_tensor_set4(grads[0], b, c_in, h_in, w_in,
+                                                   cur_dx + grad_val * w);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    return grads;
+}
+
+// ============================================
+// Conv2D Forward (Functional)
+// ============================================
+
+nc_tensor* nc_conv2d_forward(nc_tensor* input, nc_tensor* weight, 
+                             nc_tensor* bias, size_t stride, size_t padding) {
+    if (!input || !weight) return NULL;
+    if (input->ndim != 4 || weight->ndim != 4) {
+        NC_SET_ERROR(NC_ERR_SHAPE_MISMATCH, "Conv2D requires 4D tensors");
+        return NULL;
+    }
+    
+    size_t N = input->shape[0];
+    size_t C_in = input->shape[1];
+    size_t H = input->shape[2];
+    size_t W = input->shape[3];
+    
+    size_t C_out = weight->shape[0];
+    size_t kH = weight->shape[2];
+    size_t kW = weight->shape[3];
+    
+    if (weight->shape[1] != C_in) {
+        NC_SET_ERROR(NC_ERR_SHAPE_MISMATCH, "Conv2D: input channels mismatch");
+        return NULL;
+    }
+    
+    size_t H_out = nc_conv_output_size(H, kH, stride, padding);
+    size_t W_out = nc_conv_output_size(W, kW, stride, padding);
+    
+    size_t out_shape[] = {N, C_out, H_out, W_out};
+    nc_tensor* out = nc_tensor_zeros(out_shape, 4, input->dtype);
+    if (!out) return NULL;
+    
+    // Convolution
+    for (size_t b = 0; b < N; b++) {
+        for (size_t c_out = 0; c_out < C_out; c_out++) {
+            for (size_t h_out = 0; h_out < H_out; h_out++) {
+                for (size_t w_out = 0; w_out < W_out; w_out++) {
+                    double sum = 0.0;
+                    
+                    for (size_t c_in = 0; c_in < C_in; c_in++) {
+                        for (size_t kh = 0; kh < kH; kh++) {
+                            for (size_t kw = 0; kw < kW; kw++) {
+                                int h_in = (int)(h_out * stride + kh) - (int)padding;
+                                int w_in = (int)(w_out * stride + kw) - (int)padding;
+                                
+                                if (h_in >= 0 && h_in < (int)H && 
+                                    w_in >= 0 && w_in < (int)W) {
+                                    double inp = nc_tensor_get4(input, b, c_in, h_in, w_in);
+                                    double w = nc_tensor_get4(weight, c_out, c_in, kh, kw);
+                                    sum += inp * w;
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Add bias
+                    if (bias) {
+                        sum += nc_tensor_get1(bias, c_out);
+                    }
+                    
+                    nc_tensor_set4(out, b, c_out, h_out, w_out, sum);
+                }
+            }
+        }
+    }
+    
+    // Setup autograd
+    if (nc_grad_enabled() && (input->requires_grad || weight->requires_grad)) {
+        out->requires_grad = true;
+        out->is_leaf = false;
+        
+        nc_node* node = nc_node_create("conv2d", nc_backward_conv2d);
+        if (node) {
+            nc_node_add_input(node, input);
+            nc_node_add_input(node, weight);
+            if (bias) nc_node_add_input(node, bias);
+            
+            // Save tensors for backward: input, weight, bias, stride, padding
+            nc_node_save_tensor(node, input);
+            nc_node_save_tensor(node, weight);
+            nc_node_save_tensor(node, bias);  // Can be NULL
+            
+            nc_tensor* stride_t = nc_tensor_scalar((double)stride, NC_F32);
+            nc_tensor* padding_t = nc_tensor_scalar((double)padding, NC_F32);
+            nc_node_save_owned_tensor(node, stride_t);
+            nc_node_save_owned_tensor(node, padding_t);
+            
+            node->output = out;
+            out->grad_fn = node;
+        }
+    }
+    
+    return out;
+}
+
+// ============================================
+// Conv2D Module
+// ============================================
+
+typedef struct {
+    size_t kernel_size;
+    size_t stride;
+} nc_maxpool_data;
+
+static nc_tensor* conv2d_module_forward(nc_module* self, nc_tensor* input) {
+    nc_conv2d_data* data = self->extra;
+    nc_tensor* weight = nc_module_get_param(self, "weight");
+    nc_tensor* bias = nc_module_get_param(self, "bias");
+    
+    return nc_conv2d_forward(input, weight, bias, data->stride, data->padding);
+}
+
+// Custom print for Conv2D
+static void conv2d_print(nc_module* m) {
+    nc_conv2d_data* data = m->extra;
+    printf("Conv2D(%zu, %zu, kernel_size=%zu, stride=%zu, padding=%zu, bias=%s)\n",
+           data->in_channels, data->out_channels, data->kernel_size,
+           data->stride, data->padding, data->has_bias ? "true" : "false");
+}
+
+// Custom print for MaxPool2D
+static void maxpool_print(nc_module* m) {
+    nc_maxpool_data* data = m->extra;
+    printf("MaxPool2D(kernel_size=%zu, stride=%zu)\n",
+           data->kernel_size, data->stride);
+}
+
+nc_module* nc_conv2d(size_t in_channels, size_t out_channels,
+                     size_t kernel_size, size_t stride,
+                     size_t padding, bool bias) {
+    nc_module* m = nc_module_create("Conv2D");
+    if (!m) return NULL;
+    
+    nc_conv2d_data* data = nc_alloc(sizeof(nc_conv2d_data));
+    if (!data) { nc_module_free(m); return NULL; }
+    
+    data->in_channels = in_channels;
+    data->out_channels = out_channels;
+    data->kernel_size = kernel_size;
+    data->stride = stride;
+    data->padding = padding;
+    data->has_bias = bias;
+    
+    m->extra = data;
+    m->free_extra = nc_free;
+    m->forward = conv2d_module_forward;
+    
+    // Weight: (out_channels, in_channels, kernel_size, kernel_size)
+    size_t w_shape[] = {out_channels, in_channels, kernel_size, kernel_size};
+    nc_tensor* weight = nc_tensor_empty(w_shape, 4, NC_F32);
+    if (!weight) { nc_module_free(m); return NULL; }
+    
+    // Kaiming initialization
+    double fan_in = (double)(in_channels * kernel_size * kernel_size);
+    double std = sqrt(2.0 / fan_in);
+    for (size_t i = 0; i < weight->numel; i++) {
+        double u1 = (double)rand() / RAND_MAX;
+        double u2 = (double)rand() / RAND_MAX;
+        double z = sqrt(-2.0 * log(u1 + 1e-10)) * cos(2.0 * 3.14159265 * u2);
+        nc_tensor_set_flat(weight, i, z * std);
+    }
+    nc_module_add_param(m, "weight", weight);
+    
+    // Bias
+    if (bias) {
+        size_t b_shape[] = {out_channels};
+        nc_tensor* b = nc_tensor_zeros(b_shape, 1, NC_F32);
+        if (!b) { nc_module_free(m); return NULL; }
+        nc_module_add_param(m, "bias", b);
+    }
+    
+    return m;
+}
+
+nc_module* nc_conv2d_simple(size_t in_channels, size_t out_channels,
+                            size_t kernel_size) {
+    return nc_conv2d(in_channels, out_channels, kernel_size, 1, 0, true);
+}
+
+nc_tensor* nc_conv2d_weight(nc_module* conv) {
+    return nc_module_get_param(conv, "weight");
+}
+
+nc_tensor* nc_conv2d_bias(nc_module* conv) {
+    return nc_module_get_param(conv, "bias");
+}
+
+// ============================================
+// MaxPool2D Backward
+// ============================================
+
+nc_tensor** nc_backward_maxpool2d(nc_tensor* grad, nc_tensor** saved, size_t n) {
+    (void)n;
+    nc_tensor** grads = nc_calloc(1, sizeof(nc_tensor*));
+    if (!grads) return NULL;
+    
+    nc_tensor* input = saved[0];
+    size_t kernel_size = (size_t)nc_tensor_get_flat(saved[1], 0);
+    size_t stride = (size_t)nc_tensor_get_flat(saved[2], 0);
+    
+    size_t N = input->shape[0];
+    size_t C = input->shape[1];
+    size_t H = input->shape[2];
+    size_t W = input->shape[3];
+    
+    size_t H_out = (H - kernel_size) / stride + 1;
+    size_t W_out = (W - kernel_size) / stride + 1;
+    
+    grads[0] = nc_tensor_zeros(input->shape, input->ndim, input->dtype);
+    
+    for (size_t b = 0; b < N; b++) {
+        for (size_t c = 0; c < C; c++) {
+            for (size_t h_out = 0; h_out < H_out; h_out++) {
+                for (size_t w_out = 0; w_out < W_out; w_out++) {
+                    // Find max index
+                    double max_val = -1e30;
+                    size_t max_h = 0, max_w = 0;
+                    
+                    for (size_t kh = 0; kh < kernel_size; kh++) {
+                        for (size_t kw = 0; kw < kernel_size; kw++) {
+                            size_t h_in = h_out * stride + kh;
+                            size_t w_in = w_out * stride + kw;
+                            double val = nc_tensor_get4(input, b, c, h_in, w_in);
+                            if (val > max_val) {
+                                max_val = val;
+                                max_h = h_in;
+                                max_w = w_in;
+                            }
+                        }
+                    }
+                    
+                    // Route gradient to max element
+                    double g = nc_tensor_get4(grad, b, c, h_out, w_out);
+                    double cur = nc_tensor_get4(grads[0], b, c, max_h, max_w);
+                    nc_tensor_set4(grads[0], b, c, max_h, max_w, cur + g);
+                }
+            }
+        }
+    }
+    
+    return grads;
+}
+
+// ============================================
+// MaxPool2D Forward
+// ============================================
+
+nc_tensor* nc_maxpool2d_forward(nc_tensor* input, size_t kernel_size, size_t stride) {
+    if (!input || input->ndim != 4) return NULL;
+    
+    size_t N = input->shape[0];
+    size_t C = input->shape[1];
+    size_t H = input->shape[2];
+    size_t W = input->shape[3];
+    
+    size_t H_out = (H - kernel_size) / stride + 1;
+    size_t W_out = (W - kernel_size) / stride + 1;
+    
+    size_t out_shape[] = {N, C, H_out, W_out};
+    nc_tensor* out = nc_tensor_empty(out_shape, 4, input->dtype);
+    if (!out) return NULL;
+    
+    for (size_t b = 0; b < N; b++) {
+        for (size_t c = 0; c < C; c++) {
+            for (size_t h_out = 0; h_out < H_out; h_out++) {
+                for (size_t w_out = 0; w_out < W_out; w_out++) {
+                    double max_val = -1e30;
+                    
+                    for (size_t kh = 0; kh < kernel_size; kh++) {
+                        for (size_t kw = 0; kw < kernel_size; kw++) {
+                            size_t h_in = h_out * stride + kh;
+                            size_t w_in = w_out * stride + kw;
+                            double val = nc_tensor_get4(input, b, c, h_in, w_in);
+                            if (val > max_val) max_val = val;
+                        }
+                    }
+                    
+                    nc_tensor_set4(out, b, c, h_out, w_out, max_val);
+                }
+            }
+        }
+    }
+    
+    // Setup autograd
+    if (nc_grad_enabled() && input->requires_grad) {
+        out->requires_grad = true;
+        out->is_leaf = false;
+        
+        nc_node* node = nc_node_create("maxpool2d", nc_backward_maxpool2d);
+        if (node) {
+            nc_node_add_input(node, input);
+            nc_node_save_tensor(node, input);
+            
+            nc_tensor* ks_t = nc_tensor_scalar((double)kernel_size, NC_F32);
+            nc_tensor* st_t = nc_tensor_scalar((double)stride, NC_F32);
+            nc_node_save_owned_tensor(node, ks_t);
+            nc_node_save_owned_tensor(node, st_t);
+            
+            node->output = out;
+            out->grad_fn = node;
+        }
+    }
+    
+    return out;
+}
+
+static nc_tensor* maxpool_forward(nc_module* self, nc_tensor* input) {
+    nc_maxpool_data* data = self->extra;
+    return nc_maxpool2d_forward(input, data->kernel_size, data->stride);
+}
+
+nc_module* nc_maxpool2d(size_t kernel_size, size_t stride) {
+    nc_module* m = nc_module_create("MaxPool2D");
+    if (!m) return NULL;
+    
+    nc_maxpool_data* data = nc_alloc(sizeof(nc_maxpool_data));
+    if (!data) { nc_module_free(m); return NULL; }
+    
+    data->kernel_size = kernel_size;
+    data->stride = stride;
+    
+    m->extra = data;
+    m->free_extra = nc_free;
+    m->forward = maxpool_forward;
+    
+    return m;
+}
+
+nc_module* nc_maxpool2d_simple(size_t kernel_size) {
+    return nc_maxpool2d(kernel_size, kernel_size);
+}
+
+// ============================================
+// AvgPool2D
+// ============================================
+
+nc_tensor* nc_avgpool2d_forward(nc_tensor* input, size_t kernel_size, size_t stride) {
+    if (!input || input->ndim != 4) return NULL;
+    
+    size_t N = input->shape[0];
+    size_t C = input->shape[1];
+    size_t H = input->shape[2];
+    size_t W = input->shape[3];
+    
+    size_t H_out = (H - kernel_size) / stride + 1;
+    size_t W_out = (W - kernel_size) / stride + 1;
+    
+    size_t out_shape[] = {N, C, H_out, W_out};
+    nc_tensor* out = nc_tensor_zeros(out_shape, 4, input->dtype);
+    if (!out) return NULL;
+    
+    double pool_size = (double)(kernel_size * kernel_size);
+    
+    for (size_t b = 0; b < N; b++) {
+        for (size_t c = 0; c < C; c++) {
+            for (size_t h_out = 0; h_out < H_out; h_out++) {
+                for (size_t w_out = 0; w_out < W_out; w_out++) {
+                    double sum = 0.0;
+                    
+                    for (size_t kh = 0; kh < kernel_size; kh++) {
+                        for (size_t kw = 0; kw < kernel_size; kw++) {
+                            size_t h_in = h_out * stride + kh;
+                            size_t w_in = w_out * stride + kw;
+                            sum += nc_tensor_get4(input, b, c, h_in, w_in);
+                        }
+                    }
+                    
+                    nc_tensor_set4(out, b, c, h_out, w_out, sum / pool_size);
+                }
+            }
+        }
+    }
+    
+    return out;
+}
+
+// ============================================
+// Flatten Layer
+// ============================================
+
+static nc_tensor* flatten_forward(nc_module* self, nc_tensor* input) {
+    (void)self;
+    if (!input) return NULL;
+    
+    // Keep batch dimension, flatten the rest
+    size_t batch = input->shape[0];
+    size_t flat_size = input->numel / batch;
+    
+    size_t out_shape[] = {batch, flat_size};
+    return nc_tensor_reshape(input, out_shape, 2);
+}
+
+nc_module* nc_flatten(void) {
+    nc_module* m = nc_module_create("Flatten");
+    if (!m) return NULL;
+    m->forward = flatten_forward;
+    return m;
+}

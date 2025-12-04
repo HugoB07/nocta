@@ -515,7 +515,7 @@ nc_tensor* nc_tensor_transpose(nc_tensor* t, size_t dim0, size_t dim1) {
     v->ndim = t->ndim;
     v->numel = t->numel;
     v->dtype = t->dtype;
-    v->requires_grad = t->requires_grad;
+    v->requires_grad = t->requires_grad;  // <-- IMPORTANT: propagate requires_grad
     
     memcpy(v->shape, t->shape, sizeof(t->shape));
     memcpy(v->strides, t->strides, sizeof(t->strides));

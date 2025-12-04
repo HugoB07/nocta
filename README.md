@@ -8,7 +8,8 @@ Nocta provides PyTorch-like functionality with automatic differentiation, tensor
 
 - **Tensors**: N-dimensional arrays with broadcasting, views, and type support (float32, float64, int32, int64)
 - **Automatic Differentiation**: Dynamic computation graph with backpropagation
-- **Neural Network Modules**: Linear layers, activations (ReLU, Sigmoid, Tanh, Softmax, GELU, etc.)
+- **Neural Network Modules**: Linear layers, Convolutional layers (Conv2d, MaxPool2d), activations (ReLU, Sigmoid, Tanh, Softmax, GELU, etc.)
+- **Loss Functions**: CrossEntropy, MSE
 - **Optimizers**: SGD (with momentum, Nesterov), Adam, AdamW
 - **Serialization**: Save/load tensors, models, and training checkpoints in custom .ncta format
 - **Memory Efficient**: Reference-counted storage, aligned allocations, detailed memory tracking
@@ -123,6 +124,10 @@ int main() {
 }
 ```
 
+## Example: MNIST
+
+See `examples/mnist.c` for a complete example of training a Convolutional Neural Network on the MNIST dataset.
+
 ## API Overview
 
 ### Tensor Creation
@@ -174,6 +179,9 @@ nc_tensor_zero_grad_(t);             // Reset gradients
 nc_module* layer = nc_linear(in_features, out_features, bias);
 nc_tensor* output = nc_module_forward(layer, input);
 nc_module_free(layer);
+
+nc_module* conv = nc_conv2d(in_channels, out_channels, kernel_size, stride, padding);
+nc_module* pool = nc_maxpool2d(kernel_size, stride);
 ```
 
 ### Optimizers
@@ -246,7 +254,7 @@ Memory leaks:    0 bytes
 ## Roadmap
 
 - [x] Model serialization (save/load tensors, modules, checkpoints)
-- [ ] Convolution layers (Conv2D, MaxPool)
+- [x] Convolution layers (Conv2D, MaxPool)
 - [ ] Batch normalization
 - [ ] Dropout
 - [ ] SIMD optimizations (AVX2/AVX512)

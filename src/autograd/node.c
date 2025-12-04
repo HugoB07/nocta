@@ -24,12 +24,27 @@ void nc_node_add_input(nc_node* node, nc_tensor* input) {
 
 void nc_node_save_tensor(nc_node* node, nc_tensor* t) {
     if (!node || node->n_saved >= NC_MAX_INPUTS) return;
-    node->saved_tensors[node->n_saved++] = t;
+    node->saved_tensors[node->n_saved] = t;
+    node->saved_tensors_owned[node->n_saved] = false;
+    node->n_saved++;
+}
+
+void nc_node_save_owned_tensor(nc_node* node, nc_tensor* t) {
+    if (!node || node->n_saved >= NC_MAX_INPUTS) return;
+    node->saved_tensors[node->n_saved] = t;
+    node->saved_tensors_owned[node->n_saved] = true;
+    node->n_saved++;
 }
 
 void nc_node_free(nc_node* node) {
     if (!node) return;
-    // Don't free inputs or saved_tensors - they're owned elsewhere
+    // Free owned saved tensors
+    for (size_t i = 0; i < node->n_saved; i++) {
+        if (node->saved_tensors_owned[i]) {
+            nc_tensor_free(node->saved_tensors[i]);
+        }
+    }
+    
     // Just free the node itself
     nc_free(node);
 }

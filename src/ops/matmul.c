@@ -2,18 +2,19 @@
 #include "nocta/autograd/node.h"
 #include "nocta/autograd/backward.h"
 #include <string.h>
+#include <stdio.h>
 
 // ============================================
 // Backward
 // ============================================
 
-nc_tensor** nc_backward_matmul(nc_tensor* grad, nc_tensor** inputs, size_t n) {
+nc_tensor** nc_backward_matmul(nc_tensor* grad, nc_tensor** saved, size_t n) {
     (void)n;
     nc_tensor** grads = nc_calloc(2, sizeof(nc_tensor*));
     if (!grads) return NULL;
     
-    nc_tensor* a = inputs[0];  // (M, K)
-    nc_tensor* b = inputs[1];  // (K, N)
+    nc_tensor* a = saved[0];  // (M, K)
+    nc_tensor* b = saved[1];  // (K, N)
     // grad is (M, N)
     
     // grad_a = grad @ b^T  -> (M, N) @ (N, K) = (M, K)
@@ -42,7 +43,6 @@ nc_tensor** nc_backward_matmul(nc_tensor* grad, nc_tensor** inputs, size_t n) {
 // Core matmul implementation
 // ============================================
 
-// Simple 2D matmul: (M, K) @ (K, N) -> (M, N)
 static nc_tensor* matmul_2d(nc_tensor* a, nc_tensor* b) {
     size_t M = a->shape[0];
     size_t K = a->shape[1];
@@ -59,7 +59,6 @@ static nc_tensor* matmul_2d(nc_tensor* a, nc_tensor* b) {
     nc_tensor* out = nc_tensor_zeros(out_shape, 2, dtype);
     if (!out) return NULL;
     
-    // Basic triple loop (will optimize with SIMD later)
     for (size_t i = 0; i < M; i++) {
         for (size_t j = 0; j < N; j++) {
             double sum = 0.0;
@@ -75,7 +74,6 @@ static nc_tensor* matmul_2d(nc_tensor* a, nc_tensor* b) {
     return out;
 }
 
-// Matrix-vector: (M, K) @ (K,) -> (M,)
 static nc_tensor* matmul_mv(nc_tensor* mat, nc_tensor* vec) {
     size_t M = mat->shape[0];
     size_t K = mat->shape[1];
@@ -101,7 +99,6 @@ static nc_tensor* matmul_mv(nc_tensor* mat, nc_tensor* vec) {
     return out;
 }
 
-// Vector-matrix: (K,) @ (K, N) -> (N,)
 static nc_tensor* matmul_vm(nc_tensor* vec, nc_tensor* mat) {
     size_t K = vec->shape[0];
     size_t N = mat->shape[1];
@@ -141,18 +138,20 @@ nc_tensor* nc_matmul(nc_tensor* a, nc_tensor* b) {
     } else if (a->ndim == 1 && b->ndim == 2) {
         out = matmul_vm(a, b);
     } else if (a->ndim == 1 && b->ndim == 1) {
-        // Dot product
         out = nc_dot(a, b);
     } else if (a->ndim >= 3 || b->ndim >= 3) {
-        // Batched matmul
         out = nc_bmm(a, b);
     } else {
         NC_SET_ERROR(NC_ERR_SHAPE_MISMATCH, "Invalid matmul dimensions");
         return NULL;
     }
     
-    // Setup autograd
-    if (out && nc_grad_enabled() && (a->requires_grad || b->requires_grad)) {
+    if (!out) return NULL;
+    
+    // Setup autograd - check if EITHER input requires grad
+    bool needs_grad = nc_grad_enabled() && (a->requires_grad || b->requires_grad);
+    
+    if (needs_grad) {
         out->requires_grad = true;
         out->is_leaf = false;
         
@@ -179,7 +178,6 @@ nc_tensor* nc_bmm(nc_tensor* a, nc_tensor* b) {
         return NULL;
     }
     
-    // Get batch dimensions
     size_t batch = a->shape[0];
     size_t M = a->shape[a->ndim - 2];
     size_t K = a->shape[a->ndim - 1];
@@ -195,7 +193,6 @@ nc_tensor* nc_bmm(nc_tensor* a, nc_tensor* b) {
         nc_dtype_promote(a->dtype, b->dtype));
     if (!out) return NULL;
     
-    // Loop over batch
     for (size_t bi = 0; bi < batch; bi++) {
         for (size_t i = 0; i < M; i++) {
             for (size_t j = 0; j < N; j++) {
@@ -279,7 +276,6 @@ nc_tensor* nc_addmm(nc_tensor* c, nc_tensor* a, nc_tensor* b,
         return NULL;
     }
     
-    // out = beta * c + alpha * (a @ b)
     for (size_t i = 0; i < out->numel; i++) {
         double v = beta * nc_tensor_get_flat(c, i) + 
                    alpha * nc_tensor_get_flat(ab, i);
