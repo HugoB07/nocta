@@ -86,4 +86,9 @@ nc_tensor** nc_backward_log(nc_tensor* grad, nc_tensor** inputs, size_t n);
 nc_tensor** nc_backward_conv2d(nc_tensor* grad, nc_tensor** inputs, size_t n);
 nc_tensor** nc_backward_maxpool2d(nc_tensor* grad, nc_tensor** inputs, size_t n);
 
+// Normalization
+nc_tensor** nc_backward_batchnorm2d(nc_tensor* grad, nc_tensor** inputs, size_t n);
+nc_tensor** nc_backward_batchnorm1d(nc_tensor* grad, nc_tensor** inputs, size_t n);
+nc_tensor** nc_backward_layernorm(nc_tensor* grad, nc_tensor** inputs, size_t n);
+
 #endif // NOCTA_NODE_H

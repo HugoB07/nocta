@@ -43,6 +43,7 @@ set(NOCTA_SOURCES
     src/nn/module.c
     src/nn/linear.c
     src/nn/conv.c
+    src/nn/batchnorm.c
     src/optim/optimizer.c
     src/optim/sgd.c
     src/optim/adam.c
@@ -73,4 +74,7 @@ if(NOCTA_BUILD_EXAMPLES)
     
     add_executable(example_mnist examples/mnist.c)
     target_link_libraries(example_mnist PRIVATE nocta)
+    
+    add_executable(example_batchnorm examples/batchnorm.c)
+    target_link_libraries(example_batchnorm PRIVATE nocta)
 endif()

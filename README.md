@@ -8,8 +8,8 @@ Nocta provides PyTorch-like functionality with automatic differentiation, tensor
 
 - **Tensors**: N-dimensional arrays with broadcasting, views, and type support (float32, float64, int32, int64)
 - **Automatic Differentiation**: Dynamic computation graph with backpropagation
-- **Neural Network Modules**: Linear layers, Convolutional layers (Conv2d, MaxPool2d), activations (ReLU, Sigmoid, Tanh, Softmax, GELU, etc.)
-- **Loss Functions**: CrossEntropy, MSE
+- **Neural Network Modules**: Linear layers, Convolutional layers (Conv2d, MaxPool2d), Normalization (BatchNorm1d, BatchNorm2d, LayerNorm), activations (ReLU, Sigmoid, Tanh, Softmax, GELU, etc.)
+- **Loss Functions**: CrossEntropy, MSE, BCE
 - **Optimizers**: SGD (with momentum, Nesterov), Adam, AdamW
 - **Serialization**: Save/load tensors, models, and training checkpoints in custom .ncta format
 - **Memory Efficient**: Reference-counted storage, aligned allocations, detailed memory tracking
@@ -69,75 +69,53 @@ cmake --build . --config Release
 | `NOCTA_BUILD_EXAMPLES` | ON | Build example programs |
 | `NOCTA_ENABLE_SIMD` | OFF | Enable AVX2 SIMD optimizations |
 
-## Example: XOR Neural Network
+## Example: CNN with BatchNorm
 
 ```c
 #include "nocta/nocta.h"
+#include "nocta/nn/batchnorm.h"
 
 int main() {
-    // XOR dataset
-    float X_data[] = {0,0, 0,1, 1,0, 1,1};
-    float Y_data[] = {0, 1, 1, 0};
+    // Create layers
+    nc_module* conv = nc_conv2d(1, 16, 3, 1, 1, false);  // No bias before BN
+    nc_module* bn = nc_batchnorm2d(16);
+    nc_module* fc = nc_linear(16 * 14 * 14, 10, true);
     
-    size_t x_shape[] = {4, 2};
-    size_t y_shape[] = {4, 1};
+    // Input: (batch=4, channels=1, H=28, W=28)
+    size_t shape[] = {4, 1, 28, 28};
+    nc_tensor* x = nc_tensor_randn(shape, 4, NC_F32);
     
-    nc_tensor* X = nc_tensor_from_data(X_data, x_shape, 2, NC_F32);
-    nc_tensor* Y = nc_tensor_from_data(Y_data, y_shape, 2, NC_F32);
+    // Forward: Conv -> BatchNorm -> ReLU -> Pool -> FC
+    nc_tensor* h = nc_module_forward(conv, x);
+    nc_tensor* bn_out = nc_module_forward(bn, h);
+    nc_tensor* act = nc_relu(bn_out);
+    // ... continue with pooling, flatten, fc
     
-    // Create weights: 2 -> 8 -> 1
-    size_t w1_shape[] = {2, 8};
-    size_t w2_shape[] = {8, 1};
+    // Training vs Eval mode
+    nc_module_train(bn, true);   // Use batch statistics
+    nc_module_train(bn, false);  // Use running statistics
     
-    nc_tensor* W1 = nc_tensor_randn(w1_shape, 2, NC_F32);
-    nc_tensor* W2 = nc_tensor_randn(w2_shape, 2, NC_F32);
-    
-    nc_tensor_requires_grad_(W1, true);
-    nc_tensor_requires_grad_(W2, true);
-    
-    double lr = 1.0;
-    
-    for (int epoch = 0; epoch < 5000; epoch++) {
-        nc_tensor_zero_grad_(W1);
-        nc_tensor_zero_grad_(W2);
-        
-        // Forward: relu(X @ W1) @ W2 -> sigmoid
-        nc_tensor* h = nc_relu(nc_matmul(X, W1));
-        nc_tensor* pred = nc_sigmoid(nc_matmul(h, W2));
-        
-        // MSE Loss
-        nc_tensor* diff = nc_sub(pred, Y);
-        nc_tensor* loss = nc_mean_all(nc_mul(diff, diff));
-        
-        // Backward
-        nc_backward_scalar(loss);
-        
-        // Update weights
-        for (size_t i = 0; i < W1->numel; i++) {
-            nc_tensor_set_flat(W1, i, 
-                nc_tensor_get_flat(W1, i) - lr * nc_tensor_get_flat(W1->grad, i));
-        }
-        // ... same for W2
-    }
+    // Cleanup
+    nc_module_free(conv);
+    nc_module_free(bn);
+    nc_module_free(fc);
+    nc_tensor_free(x);
+    // ... free other tensors
     
     return 0;
 }
 ```
-
-## Example: MNIST
-
-See `examples/mnist.c` for a complete example of training a Convolutional Neural Network on the MNIST dataset.
 
 ## API Overview
 
 ### Tensor Creation
 
 ```c
-nc_tensor* nc_tensor_empty(shape, ndim, dtype);    // Uninitialized
-nc_tensor* nc_tensor_zeros(shape, ndim, dtype);    // Filled with 0
-nc_tensor* nc_tensor_ones(shape, ndim, dtype);     // Filled with 1
-nc_tensor* nc_tensor_randn(shape, ndim, dtype);    // Normal distribution
-nc_tensor* nc_tensor_from_data(data, shape, ndim, dtype);  // From array
+nc_tensor* nc_tensor_empty(shape, ndim, dtype);
+nc_tensor* nc_tensor_zeros(shape, ndim, dtype);
+nc_tensor* nc_tensor_ones(shape, ndim, dtype);
+nc_tensor* nc_tensor_randn(shape, ndim, dtype);
+nc_tensor* nc_tensor_from_data(data, shape, ndim, dtype);
 ```
 
 ### Operations
@@ -147,83 +125,49 @@ nc_tensor* nc_tensor_from_data(data, shape, ndim, dtype);  // From array
 nc_tensor* nc_add(a, b);
 nc_tensor* nc_sub(a, b);
 nc_tensor* nc_mul(a, b);
-nc_tensor* nc_div(a, b);
-
-// Matrix
 nc_tensor* nc_matmul(a, b);
-nc_tensor* nc_tensor_t(a);  // Transpose
 
 // Activations
 nc_tensor* nc_relu(x);
 nc_tensor* nc_sigmoid(x);
-nc_tensor* nc_tanh_act(x);
 nc_tensor* nc_softmax(x, dim);
 
 // Reductions
 nc_tensor* nc_sum_all(x);
 nc_tensor* nc_mean_all(x);
-nc_tensor* nc_max_all(x);
-```
-
-### Autograd
-
-```c
-nc_tensor_requires_grad_(t, true);  // Enable gradient tracking
-nc_backward_scalar(loss);            // Backpropagation
-nc_tensor_zero_grad_(t);             // Reset gradients
 ```
 
 ### Neural Network Modules
 
 ```c
-nc_module* layer = nc_linear(in_features, out_features, bias);
-nc_tensor* output = nc_module_forward(layer, input);
-nc_module_free(layer);
+// Linear
+nc_module* nc_linear(in_features, out_features, bias);
 
-nc_module* conv = nc_conv2d(in_channels, out_channels, kernel_size, stride, padding);
-nc_module* pool = nc_maxpool2d(kernel_size, stride);
+// Convolution
+nc_module* nc_conv2d(in_ch, out_ch, kernel, stride, padding, bias);
+nc_module* nc_maxpool2d(kernel_size, stride);
+
+// Normalization
+nc_module* nc_batchnorm1d(num_features);
+nc_module* nc_batchnorm2d(num_features);
+nc_module* nc_layernorm(normalized_shape, ndim);
+
+// Forward pass
+nc_tensor* output = nc_module_forward(module, input);
+
+// Training/Eval mode (affects BatchNorm, Dropout)
+nc_module_train(module, true);   // Training mode
+nc_module_train(module, false);  // Eval mode
 ```
 
 ### Optimizers
 
 ```c
-nc_optimizer* opt = nc_sgd_momentum(module, lr, momentum);
-nc_optimizer* opt = nc_adam_default(module, lr);
+nc_optimizer* nc_sgd_momentum(module, lr, momentum);
+nc_optimizer* nc_adam_default(module, lr);
 
 nc_optimizer_zero_grad(opt);
 nc_optimizer_step(opt);
-nc_optimizer_free(opt);
-```
-
-### Serialization
-
-```c
-// Save/load single tensor
-nc_tensor_save(tensor, "weights.ncta");
-nc_tensor* loaded = nc_tensor_load("weights.ncta");
-
-// Save/load model
-nc_module_save(model, "model.ncta");
-nc_module_load(model, "model.ncta");
-
-// State dict (PyTorch-style)
-nc_state_dict* sd = nc_module_state_dict(model);
-nc_state_dict_save(sd, "checkpoint.ncta");
-nc_state_dict* loaded_sd = nc_state_dict_load("checkpoint.ncta");
-
-// Training checkpoints
-nc_checkpoint ckpt = {
-    .model_state = nc_module_state_dict(model),
-    .optimizer_state = optimizer_state_dict,
-    .epoch = 100,
-    .loss = 0.001
-};
-nc_checkpoint_save(&ckpt, "training.ncta");
-nc_checkpoint* loaded = nc_checkpoint_load("training.ncta");
-
-// File utilities
-nc_file_info("model.ncta");           // Print file contents
-bool valid = nc_file_verify("model.ncta");  // Verify integrity
 ```
 
 ## Project Structure
@@ -235,27 +179,18 @@ nocta/
 │   ├── core/            # Tensor, memory, types, serialization
 │   ├── autograd/        # Automatic differentiation
 │   ├── ops/             # Operations (arithmetic, matmul, activations)
-│   ├── nn/              # Neural network modules
+│   ├── nn/              # Neural network modules (linear, conv, batchnorm)
 │   └── optim/           # Optimizers
 ├── src/                 # Implementation files
 ├── examples/            # Example programs
 └── CMakeLists.txt
 ```
 
-## Performance
-
-Memory efficiency on XOR example (5000 epochs):
-```
-Total allocated: 97.9 MB
-Peak usage:      15.6 KB
-Memory leaks:    0 bytes
-```
-
 ## Roadmap
 
 - [x] Model serialization (save/load tensors, modules, checkpoints)
 - [x] Convolution layers (Conv2D, MaxPool)
-- [ ] Batch normalization
+- [x] Batch normalization (BatchNorm1D, BatchNorm2D, LayerNorm)
 - [ ] Dropout
 - [ ] SIMD optimizations (AVX2/AVX512)
 - [ ] GPU support (OpenCL/CUDA)
