@@ -4,6 +4,10 @@
 #include <math.h>
 #include <float.h>
 
+#ifdef NOCTA_OPENMP_ENABLED
+#include <omp.h>
+#endif
+
 // ============================================
 // Backward functions
 // ============================================
@@ -21,7 +25,12 @@ nc_tensor** nc_backward_sum(nc_tensor* grad, nc_tensor** inputs, size_t n) {
     }
     
     double g = nc_tensor_get_flat(grad, 0);
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         nc_tensor_set_flat(grads[0], i, g);
     }
     
@@ -41,7 +50,12 @@ nc_tensor** nc_backward_mean(nc_tensor* grad, nc_tensor** inputs, size_t n) {
     }
     
     double g = nc_tensor_get_flat(grad, 0) / (double)x->numel;
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         nc_tensor_set_flat(grads[0], i, g);
     }
     
@@ -80,7 +94,12 @@ nc_tensor* nc_sum_all(nc_tensor* x) {
     NC_CHECK_NULL(x);
     
     double sum = 0.0;
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for reduction(+:sum)
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         sum += nc_tensor_get_flat(x, i);
     }
     
@@ -124,7 +143,12 @@ nc_tensor* nc_sum(nc_tensor* x, int axis, bool keepdim) {
     for (int i = 0; i < axis; i++) outer_size *= x->shape[i];
     for (size_t i = (size_t)axis + 1; i < x->ndim; i++) inner_size *= x->shape[i];
     
-    for (size_t o = 0; o < outer_size; o++) {
+    int o;
+    (void)o;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (o = 0; o < (int)outer_size; o++) {
         for (size_t in = 0; in < inner_size; in++) {
             double sum = 0.0;
             for (size_t a = 0; a < axis_size; a++) {
@@ -148,7 +172,12 @@ nc_tensor* nc_mean_all(nc_tensor* x) {
     NC_CHECK_NULL(x);
     
     double sum = 0.0;
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for reduction(+:sum)
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         sum += nc_tensor_get_flat(x, i);
     }
     
@@ -179,7 +208,12 @@ nc_tensor* nc_mean(nc_tensor* x, int axis, bool keepdim) {
     if (axis < 0) axis = (int)x->ndim + axis;
     double n = (double)x->shape[axis];
     
-    for (size_t i = 0; i < s->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)s->numel; i++) {
         nc_tensor_set_flat(s, i, nc_tensor_get_flat(s, i) / n);
     }
     
@@ -212,7 +246,12 @@ nc_tensor* nc_var(nc_tensor* x, int axis, bool keepdim, bool unbiased) {
     
     double denom = unbiased ? (double)(axis_size - 1) : (double)axis_size;
     
-    for (size_t o = 0; o < outer_size; o++) {
+    int o;
+    (void)o;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (o = 0; o < (int)outer_size; o++) {
         for (size_t in = 0; in < inner_size; in++) {
             double mean_val = nc_tensor_get_flat(m, o * inner_size + in);
             double var_sum = 0.0;
@@ -235,7 +274,12 @@ nc_tensor* nc_std(nc_tensor* x, int axis, bool keepdim, bool unbiased) {
     nc_tensor* v = nc_var(x, axis, keepdim, unbiased);
     if (!v) return NULL;
     
-    for (size_t i = 0; i < v->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)v->numel; i++) {
         nc_tensor_set_flat(v, i, sqrt(nc_tensor_get_flat(v, i)));
     }
     
@@ -250,10 +294,28 @@ nc_tensor* nc_max_all(nc_tensor* x) {
     NC_CHECK_NULL(x);
     
     double max_val = -DBL_MAX;
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel
+    {
+        double local_max = -DBL_MAX;
+        #pragma omp for nowait
+        for (i = 0; i < (int)x->numel; i++) {
+            double v = nc_tensor_get_flat(x, i);
+            if (v > local_max) local_max = v;
+        }
+        #pragma omp critical
+        {
+            if (local_max > max_val) max_val = local_max;
+        }
+    }
+    #else
+    for (i = 0; i < (int)x->numel; i++) {
         double v = nc_tensor_get_flat(x, i);
         if (v > max_val) max_val = v;
     }
+    #endif
     
     return nc_tensor_scalar(max_val, x->dtype);
 }
@@ -262,10 +324,28 @@ nc_tensor* nc_min_all(nc_tensor* x) {
     NC_CHECK_NULL(x);
     
     double min_val = DBL_MAX;
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel
+    {
+        double local_min = DBL_MAX;
+        #pragma omp for nowait
+        for (i = 0; i < (int)x->numel; i++) {
+            double v = nc_tensor_get_flat(x, i);
+            if (v < local_min) local_min = v;
+        }
+        #pragma omp critical
+        {
+            if (local_min < min_val) min_val = local_min;
+        }
+    }
+    #else
+    for (i = 0; i < (int)x->numel; i++) {
         double v = nc_tensor_get_flat(x, i);
         if (v < min_val) min_val = v;
     }
+    #endif
     
     return nc_tensor_scalar(min_val, x->dtype);
 }
@@ -288,7 +368,12 @@ nc_tensor* nc_max(nc_tensor* x, int axis, bool keepdim) {
     for (int i = 0; i < axis; i++) outer_size *= x->shape[i];
     for (size_t i = (size_t)axis + 1; i < x->ndim; i++) inner_size *= x->shape[i];
     
-    for (size_t o = 0; o < outer_size; o++) {
+    int o;
+    (void)o;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (o = 0; o < (int)outer_size; o++) {
         for (size_t in = 0; in < inner_size; in++) {
             double max_val = -DBL_MAX;
             for (size_t a = 0; a < axis_size; a++) {
@@ -321,7 +406,12 @@ nc_tensor* nc_min(nc_tensor* x, int axis, bool keepdim) {
     for (int i = 0; i < axis; i++) outer_size *= x->shape[i];
     for (size_t i = (size_t)axis + 1; i < x->ndim; i++) inner_size *= x->shape[i];
     
-    for (size_t o = 0; o < outer_size; o++) {
+    int o;
+    (void)o;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (o = 0; o < (int)outer_size; o++) {
         for (size_t in = 0; in < inner_size; in++) {
             double min_val = DBL_MAX;
             for (size_t a = 0; a < axis_size; a++) {
@@ -357,7 +447,12 @@ nc_tensor* nc_argmax(nc_tensor* x, int axis, bool keepdim) {
     for (int i = 0; i < axis; i++) outer_size *= x->shape[i];
     for (size_t i = (size_t)axis + 1; i < x->ndim; i++) inner_size *= x->shape[i];
     
-    for (size_t o = 0; o < outer_size; o++) {
+    int o;
+    (void)o;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (o = 0; o < (int)outer_size; o++) {
         for (size_t in = 0; in < inner_size; in++) {
             double max_val = -DBL_MAX;
             size_t max_idx = 0;
@@ -394,7 +489,12 @@ nc_tensor* nc_argmin(nc_tensor* x, int axis, bool keepdim) {
     for (int i = 0; i < axis; i++) outer_size *= x->shape[i];
     for (size_t i = (size_t)axis + 1; i < x->ndim; i++) inner_size *= x->shape[i];
     
-    for (size_t o = 0; o < outer_size; o++) {
+    int o;
+    (void)o;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (o = 0; o < (int)outer_size; o++) {
         for (size_t in = 0; in < inner_size; in++) {
             double min_val = DBL_MAX;
             size_t min_idx = 0;
@@ -425,28 +525,61 @@ nc_tensor* nc_norm(nc_tensor* x, double p) {
     
     if (p == 2.0) {
         // L2 norm (Euclidean)
-        for (size_t i = 0; i < x->numel; i++) {
+        int i;
+        (void)i;
+        #ifdef NOCTA_OPENMP_ENABLED
+        #pragma omp parallel for reduction(+:sum)
+        #endif
+        for (i = 0; i < (int)x->numel; i++) {
             double v = nc_tensor_get_flat(x, i);
             sum += v * v;
         }
         return nc_tensor_scalar(sqrt(sum), x->dtype);
     } else if (p == 1.0) {
         // L1 norm
-        for (size_t i = 0; i < x->numel; i++) {
+        int i;
+        (void)i;
+        #ifdef NOCTA_OPENMP_ENABLED
+        #pragma omp parallel for reduction(+:sum)
+        #endif
+        for (i = 0; i < (int)x->numel; i++) {
             sum += fabs(nc_tensor_get_flat(x, i));
         }
         return nc_tensor_scalar(sum, x->dtype);
     } else if (p == INFINITY) {
         // L-inf norm
         double max_val = 0.0;
-        for (size_t i = 0; i < x->numel; i++) {
+        int i;
+        (void)i;
+        #ifdef NOCTA_OPENMP_ENABLED
+        #pragma omp parallel
+        {
+            double local_max = 0.0;
+            #pragma omp for nowait
+            for (i = 0; i < (int)x->numel; i++) {
+                double v = fabs(nc_tensor_get_flat(x, i));
+                if (v > local_max) local_max = v;
+            }
+            #pragma omp critical
+            {
+                if (local_max > max_val) max_val = local_max;
+            }
+        }
+        #else
+        for (i = 0; i < (int)x->numel; i++) {
             double v = fabs(nc_tensor_get_flat(x, i));
             if (v > max_val) max_val = v;
         }
+        #endif
         return nc_tensor_scalar(max_val, x->dtype);
     } else {
         // General L-p norm
-        for (size_t i = 0; i < x->numel; i++) {
+        int i;
+        (void)i;
+        #ifdef NOCTA_OPENMP_ENABLED
+        #pragma omp parallel for reduction(+:sum)
+        #endif
+        for (i = 0; i < (int)x->numel; i++) {
             sum += pow(fabs(nc_tensor_get_flat(x, i)), p);
         }
         return nc_tensor_scalar(pow(sum, 1.0 / p), x->dtype);
@@ -477,7 +610,12 @@ nc_tensor* nc_logsumexp(nc_tensor* x, int axis, bool keepdim) {
     for (int i = 0; i < axis; i++) outer_size *= x->shape[i];
     for (size_t i = (size_t)axis + 1; i < x->ndim; i++) inner_size *= x->shape[i];
     
-    for (size_t o = 0; o < outer_size; o++) {
+    int o;
+    (void)o;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (o = 0; o < (int)outer_size; o++) {
         for (size_t in = 0; in < inner_size; in++) {
             double max_val = nc_tensor_get_flat(max_vals, o * inner_size + in);
             double sum = 0.0;

@@ -4,6 +4,10 @@
 #include <math.h>
 #include <string.h>
 
+#ifdef NOCTA_OPENMP_ENABLED
+#include <omp.h>
+#endif
+
 // ============================================
 // Helper: compute broadcast shape
 // ============================================
@@ -60,7 +64,12 @@ static nc_tensor* reduce_grad_to_shape(nc_tensor* grad, nc_tensor* target) {
     if (target_numel == 1) {
         // Scalar target - sum all gradients
         double sum = 0;
-        for (size_t i = 0; i < grad_numel; i++) {
+        int i;
+        (void)i;
+        #ifdef NOCTA_OPENMP_ENABLED
+        #pragma omp parallel for reduction(+:sum)
+        #endif
+        for (i = 0; i < (int)grad_numel; i++) {
             sum += nc_tensor_get_flat(grad, i);
         }
         nc_tensor_set_flat(result, 0, sum);
@@ -68,7 +77,12 @@ static nc_tensor* reduce_grad_to_shape(nc_tensor* grad, nc_tensor* target) {
         // Bias case: (N,) from (batch, N) - sum over batch
         size_t batch = grad->shape[0];
         size_t n = grad->shape[1];
-        for (size_t j = 0; j < n; j++) {
+        int j;
+        (void)j;
+        #ifdef NOCTA_OPENMP_ENABLED
+        #pragma omp parallel for
+        #endif
+        for (j = 0; j < (int)n; j++) {
             double sum = 0;
             for (size_t i = 0; i < batch; i++) {
                 sum += nc_tensor_get2(grad, i, j);
@@ -77,6 +91,8 @@ static nc_tensor* reduce_grad_to_shape(nc_tensor* grad, nc_tensor* target) {
         }
     } else {
         // General case - copy what fits
+        // This part is tricky to parallelize generally without atomic adds or complex logic
+        // Leaving serial for safety in general broadcasting case
         for (size_t i = 0; i < target_numel && i < grad_numel; i++) {
             nc_tensor_set_flat(result, i, nc_tensor_get_flat(grad, i));
         }
@@ -283,17 +299,30 @@ nc_tensor* nc_##name(nc_tensor* a, nc_tensor* b) { \
     nc_tensor* out = nc_tensor_empty(out_shape, out_ndim, dtype); \
     if (!out) return NULL; \
     \
-    size_t idx[NC_MAX_DIMS] = {0}; \
-    for (size_t i = 0; i < out->numel; i++) { \
-        size_t ai = broadcast_index(a, idx, out_ndim); \
-        size_t bi = broadcast_index(b, idx, out_ndim); \
-        double va = nc_tensor_get_flat(a, ai - a->offset); \
-        double vb = nc_tensor_get_flat(b, bi - b->offset); \
-        nc_tensor_set_flat(out, i, va op vb); \
-        \
-        for (int d = (int)out_ndim - 1; d >= 0; d--) { \
-            if (++idx[d] < out_shape[d]) break; \
-            idx[d] = 0; \
+    if (nc_tensor_shape_eq(a, b) && nc_tensor_is_contiguous(a) && nc_tensor_is_contiguous(b)) { \
+        /* Fast path for contiguous same-shape tensors */ \
+        int i; \
+        (void)i; \
+        _Pragma("omp parallel for") \
+        for (i = 0; i < (int)out->numel; i++) { \
+            double va = nc_tensor_get_flat(a, i); \
+            double vb = nc_tensor_get_flat(b, i); \
+            nc_tensor_set_flat(out, i, va op vb); \
+        } \
+    } else { \
+        /* Slow path with broadcasting */ \
+        size_t idx[NC_MAX_DIMS] = {0}; \
+        for (size_t i = 0; i < out->numel; i++) { \
+            size_t ai = broadcast_index(a, idx, out_ndim); \
+            size_t bi = broadcast_index(b, idx, out_ndim); \
+            double va = nc_tensor_get_flat(a, ai - a->offset); \
+            double vb = nc_tensor_get_flat(b, bi - b->offset); \
+            nc_tensor_set_flat(out, i, va op vb); \
+            \
+            for (int d = (int)out_ndim - 1; d >= 0; d--) { \
+                if (++idx[d] < out_shape[d]) break; \
+                idx[d] = 0; \
+            } \
         } \
     } \
     \
@@ -319,17 +348,30 @@ nc_tensor* nc_pow(nc_tensor* a, nc_tensor* b) {
     nc_tensor* out = nc_tensor_empty(out_shape, out_ndim, dtype);
     if (!out) return NULL;
     
-    size_t idx[NC_MAX_DIMS] = {0};
-    for (size_t i = 0; i < out->numel; i++) {
-        size_t ai = broadcast_index(a, idx, out_ndim);
-        size_t bi = broadcast_index(b, idx, out_ndim);
-        double va = nc_tensor_get_flat(a, ai - a->offset);
-        double vb = nc_tensor_get_flat(b, bi - b->offset);
-        nc_tensor_set_flat(out, i, pow(va, vb));
-        
-        for (int d = (int)out_ndim - 1; d >= 0; d--) {
-            if (++idx[d] < out_shape[d]) break;
-            idx[d] = 0;
+    if (nc_tensor_shape_eq(a, b) && nc_tensor_is_contiguous(a) && nc_tensor_is_contiguous(b)) {
+        int i;
+        (void)i;
+        #ifdef NOCTA_OPENMP_ENABLED
+        #pragma omp parallel for
+        #endif
+        for (i = 0; i < (int)out->numel; i++) {
+            double va = nc_tensor_get_flat(a, i);
+            double vb = nc_tensor_get_flat(b, i);
+            nc_tensor_set_flat(out, i, pow(va, vb));
+        }
+    } else {
+        size_t idx[NC_MAX_DIMS] = {0};
+        for (size_t i = 0; i < out->numel; i++) {
+            size_t ai = broadcast_index(a, idx, out_ndim);
+            size_t bi = broadcast_index(b, idx, out_ndim);
+            double va = nc_tensor_get_flat(a, ai - a->offset);
+            double vb = nc_tensor_get_flat(b, bi - b->offset);
+            nc_tensor_set_flat(out, i, pow(va, vb));
+            
+            for (int d = (int)out_ndim - 1; d >= 0; d--) {
+                if (++idx[d] < out_shape[d]) break;
+                idx[d] = 0;
+            }
         }
     }
     
@@ -345,7 +387,12 @@ nc_tensor* nc_add_scalar(nc_tensor* a, double s) {
     NC_CHECK_NULL(a);
     nc_tensor* out = nc_tensor_clone(a);
     if (!out) return NULL;
-    for (size_t i = 0; i < out->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)out->numel; i++) {
         nc_tensor_set_flat(out, i, nc_tensor_get_flat(a, i) + s);
     }
     return out;
@@ -359,7 +406,12 @@ nc_tensor* nc_mul_scalar(nc_tensor* a, double s) {
     NC_CHECK_NULL(a);
     nc_tensor* out = nc_tensor_clone(a);
     if (!out) return NULL;
-    for (size_t i = 0; i < out->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)out->numel; i++) {
         nc_tensor_set_flat(out, i, nc_tensor_get_flat(a, i) * s);
     }
     return out;
@@ -373,7 +425,12 @@ nc_tensor* nc_pow_scalar(nc_tensor* a, double s) {
     NC_CHECK_NULL(a);
     nc_tensor* out = nc_tensor_clone(a);
     if (!out) return NULL;
-    for (size_t i = 0; i < out->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)out->numel; i++) {
         nc_tensor_set_flat(out, i, pow(nc_tensor_get_flat(a, i), s));
     }
     return out;
@@ -388,7 +445,10 @@ nc_tensor* nc_##name(nc_tensor* a) { \
     NC_CHECK_NULL(a); \
     nc_tensor* out = nc_tensor_empty(a->shape, a->ndim, a->dtype); \
     if (!out) return NULL; \
-    for (size_t i = 0; i < a->numel; i++) { \
+    int i; \
+    (void)i; \
+    _Pragma("omp parallel for") \
+    for (i = 0; i < (int)a->numel; i++) { \
         nc_tensor_set_flat(out, i, func(nc_tensor_get_flat(a, i))); \
     } \
     if (backward_fn) setup_grad_unary(out, a, #name, backward_fn); \
@@ -425,7 +485,12 @@ nc_tensor* nc_clamp(nc_tensor* a, double min_val, double max_val) {
     NC_CHECK_NULL(a);
     nc_tensor* out = nc_tensor_clone(a);
     if (!out) return NULL;
-    for (size_t i = 0; i < a->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)a->numel; i++) {
         double v = nc_tensor_get_flat(a, i);
         if (v < min_val) v = min_val;
         if (v > max_val) v = max_val;
@@ -438,7 +503,12 @@ nc_tensor* nc_reciprocal(nc_tensor* a) {
     NC_CHECK_NULL(a);
     nc_tensor* out = nc_tensor_empty(a->shape, a->ndim, a->dtype);
     if (!out) return NULL;
-    for (size_t i = 0; i < a->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)a->numel; i++) {
         nc_tensor_set_flat(out, i, 1.0 / nc_tensor_get_flat(a, i));
     }
     return out;
@@ -450,28 +520,48 @@ nc_tensor* nc_reciprocal(nc_tensor* a) {
 
 void nc_add_(nc_tensor* a, nc_tensor* b) {
     if (!a || !b || a->numel != b->numel) return;
-    for (size_t i = 0; i < a->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)a->numel; i++) {
         nc_tensor_set_flat(a, i, nc_tensor_get_flat(a, i) + nc_tensor_get_flat(b, i));
     }
 }
 
 void nc_mul_(nc_tensor* a, nc_tensor* b) {
     if (!a || !b || a->numel != b->numel) return;
-    for (size_t i = 0; i < a->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)a->numel; i++) {
         nc_tensor_set_flat(a, i, nc_tensor_get_flat(a, i) * nc_tensor_get_flat(b, i));
     }
 }
 
 void nc_add_scalar_(nc_tensor* a, double s) {
     if (!a) return;
-    for (size_t i = 0; i < a->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)a->numel; i++) {
         nc_tensor_set_flat(a, i, nc_tensor_get_flat(a, i) + s);
     }
 }
 
 void nc_mul_scalar_(nc_tensor* a, double s) {
     if (!a) return;
-    for (size_t i = 0; i < a->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)a->numel; i++) {
         nc_tensor_set_flat(a, i, nc_tensor_get_flat(a, i) * s);
     }
 }
@@ -487,16 +577,27 @@ nc_tensor* nc_##name(nc_tensor* a, nc_tensor* b) { \
     if (broadcast_shape(a, b, out_shape, &out_ndim) < 0) return NULL; \
     nc_tensor* out = nc_tensor_empty(out_shape, out_ndim, NC_BOOL); \
     if (!out) return NULL; \
-    size_t idx[NC_MAX_DIMS] = {0}; \
-    for (size_t i = 0; i < out->numel; i++) { \
-        size_t ai = broadcast_index(a, idx, out_ndim); \
-        size_t bi = broadcast_index(b, idx, out_ndim); \
-        double va = nc_tensor_get_flat(a, ai - a->offset); \
-        double vb = nc_tensor_get_flat(b, bi - b->offset); \
-        nc_tensor_set_flat(out, i, va op vb); \
-        for (int d = (int)out_ndim - 1; d >= 0; d--) { \
-            if (++idx[d] < out_shape[d]) break; \
-            idx[d] = 0; \
+    if (nc_tensor_shape_eq(a, b) && nc_tensor_is_contiguous(a) && nc_tensor_is_contiguous(b)) { \
+        int i; \
+        (void)i; \
+        _Pragma("omp parallel for") \
+        for (i = 0; i < (int)out->numel; i++) { \
+            double va = nc_tensor_get_flat(a, i); \
+            double vb = nc_tensor_get_flat(b, i); \
+            nc_tensor_set_flat(out, i, va op vb); \
+        } \
+    } else { \
+        size_t idx[NC_MAX_DIMS] = {0}; \
+        for (size_t i = 0; i < out->numel; i++) { \
+            size_t ai = broadcast_index(a, idx, out_ndim); \
+            size_t bi = broadcast_index(b, idx, out_ndim); \
+            double va = nc_tensor_get_flat(a, ai - a->offset); \
+            double vb = nc_tensor_get_flat(b, bi - b->offset); \
+            nc_tensor_set_flat(out, i, va op vb); \
+            for (int d = (int)out_ndim - 1; d >= 0; d--) { \
+                if (++idx[d] < out_shape[d]) break; \
+                idx[d] = 0; \
+            } \
         } \
     } \
     return out; \

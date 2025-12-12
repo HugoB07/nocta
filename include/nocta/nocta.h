@@ -47,9 +47,9 @@
 // Version info
 // ============================================
 #define NOCTA_VERSION_MAJOR 0
-#define NOCTA_VERSION_MINOR 3
+#define NOCTA_VERSION_MINOR 4
 #define NOCTA_VERSION_PATCH 0
-#define NOCTA_VERSION "0.3.0"
+#define NOCTA_VERSION "0.4.0"
 
 // ============================================
 // Global initialization / cleanup

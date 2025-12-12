@@ -13,6 +13,7 @@ Nocta provides PyTorch-like functionality with automatic differentiation, tensor
 - **Optimizers**: SGD (with momentum, Nesterov), Adam, AdamW
 - **Serialization**: Save/load tensors, models, and training checkpoints in custom .ncta format
 - **Memory Efficient**: Reference-counted storage, aligned allocations, detailed memory tracking
+- **Hardware Acceleration**: Multi-threading support via OpenMP and SIMD optimizations (AVX2/FMA)
 - **Cross-Platform**: Works on Windows (MSVC), Linux (GCC), and macOS (Clang)
 - **Zero Dependencies**: No external libraries required
 
@@ -67,7 +68,10 @@ cmake --build . --config Release
 | Option | Default | Description |
 |--------|---------|-------------|
 | `NOCTA_BUILD_EXAMPLES` | ON | Build example programs |
-| `NOCTA_ENABLE_SIMD` | OFF | Enable AVX2 SIMD optimizations |
+| `NOCTA_ENABLE_SIMD` | ON | Enable AVX2 SIMD optimizations |
+| `NOCTA_ENABLE_OPENMP` | ON | Enable OpenMP multi-threading |
+
+> **Note**: For best performance, always build in **Release** mode. Debug builds disable optimizations and can be significantly slower.
 
 ## Example: CNN with BatchNorm
 
@@ -191,8 +195,9 @@ nocta/
 - [x] Model serialization (save/load tensors, modules, checkpoints)
 - [x] Convolution layers (Conv2D, MaxPool)
 - [x] Batch normalization (BatchNorm1D, BatchNorm2D, LayerNorm)
+- [x] SIMD optimizations (AVX2/FMA)
+- [x] Multi-threading (OpenMP)
 - [ ] Dropout
-- [ ] SIMD optimizations (AVX2/AVX512)
 - [ ] GPU support (OpenCL/CUDA)
 
 ## License

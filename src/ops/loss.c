@@ -7,6 +7,10 @@
 #include "nocta/core/memory.h"
 #include <math.h>
 
+#ifdef NOCTA_OPENMP_ENABLED
+#include <omp.h>
+#endif
+
 // ============================================
 // Cross Entropy Backward
 // ============================================
@@ -31,7 +35,12 @@ nc_tensor** nc_backward_cross_entropy(nc_tensor* grad, nc_tensor** inputs, size_
     // grad_logits = probs - one_hot(targets)
     grads[0] = nc_tensor_clone(probs);
     
-    for (size_t b = 0; b < batch; b++) {
+    int b;
+    (void)b;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (b = 0; b < (int)batch; b++) {
         int label = (int)nc_tensor_get1(targets, b);
         if (label >= 0 && (size_t)label < n_classes) {
             double p = nc_tensor_get2(grads[0], b, label);
@@ -41,7 +50,12 @@ nc_tensor** nc_backward_cross_entropy(nc_tensor* grad, nc_tensor** inputs, size_
     
     // Scale by upstream gradient and 1/batch for mean reduction
     double scale = nc_tensor_get_flat(grad, 0) / (double)batch;
-    for (size_t i = 0; i < grads[0]->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)grads[0]->numel; i++) {
         nc_tensor_set_flat(grads[0], i, nc_tensor_get_flat(grads[0], i) * scale);
     }
     
@@ -67,7 +81,12 @@ nc_tensor** nc_backward_mse(nc_tensor* grad, nc_tensor** inputs, size_t n) {
     grads[0] = nc_tensor_empty(pred->shape, pred->ndim, pred->dtype);
     grads[1] = nc_tensor_empty(target->shape, target->ndim, target->dtype);
     
-    for (size_t i = 0; i < pred->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)pred->numel; i++) {
         double diff = nc_tensor_get_flat(pred, i) - nc_tensor_get_flat(target, i);
         nc_tensor_set_flat(grads[0], i, scale * diff);
         nc_tensor_set_flat(grads[1], i, -scale * diff);
@@ -94,7 +113,12 @@ nc_tensor** nc_backward_bce(nc_tensor* grad, nc_tensor** inputs, size_t n) {
     grads[1] = NULL; // Usually don't need gradient w.r.t. target
     
     // d(BCE)/d(pred) = -target/pred + (1-target)/(1-pred)
-    for (size_t i = 0; i < pred->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)pred->numel; i++) {
         double p = nc_tensor_get_flat(pred, i);
         double t = nc_tensor_get_flat(target, i);
         
@@ -133,7 +157,12 @@ nc_tensor* nc_cross_entropy_loss_ex(nc_tensor* logits, nc_tensor* targets,
     
     // Compute NLL loss
     double loss_sum = 0.0;
-    for (size_t b = 0; b < batch; b++) {
+    int b;
+    (void)b;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for reduction(+:loss_sum)
+    #endif
+    for (b = 0; b < (int)batch; b++) {
         int label = (int)nc_tensor_get1(targets, b);
         if (label >= 0 && (size_t)label < n_classes) {
             loss_sum -= nc_tensor_get2(log_probs, b, label);
@@ -184,7 +213,12 @@ nc_tensor* nc_mse_loss(nc_tensor* pred, nc_tensor* target) {
     
     // Compute MSE
     double sum = 0.0;
-    for (size_t i = 0; i < pred->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for reduction(+:sum)
+    #endif
+    for (i = 0; i < (int)pred->numel; i++) {
         double diff = nc_tensor_get_flat(pred, i) - nc_tensor_get_flat(target, i);
         sum += diff * diff;
     }
@@ -216,7 +250,12 @@ nc_tensor* nc_bce_loss(nc_tensor* pred, nc_tensor* target) {
     
     // Compute BCE
     double sum = 0.0;
-    for (size_t i = 0; i < pred->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for reduction(-:sum)
+    #endif
+    for (i = 0; i < (int)pred->numel; i++) {
         double p = nc_tensor_get_flat(pred, i);
         double t = nc_tensor_get_flat(target, i);
         
@@ -255,7 +294,12 @@ nc_tensor* nc_nll_loss(nc_tensor* log_probs, nc_tensor* targets) {
     size_t n_classes = log_probs->shape[1];
     
     double loss_sum = 0.0;
-    for (size_t b = 0; b < batch; b++) {
+    int b;
+    (void)b;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for reduction(-:loss_sum)
+    #endif
+    for (b = 0; b < (int)batch; b++) {
         int label = (int)nc_tensor_get1(targets, b);
         if (label >= 0 && (size_t)label < n_classes) {
             loss_sum -= nc_tensor_get2(log_probs, b, label);

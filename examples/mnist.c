@@ -8,6 +8,10 @@
 #include "nocta/nn/conv.h"
 #include "nocta/nn/batchnorm.h"
 
+#ifdef NOCTA_OPENMP_ENABLED
+#include <omp.h>
+#endif
+
 // ============================================
 // MNIST Data Loading
 // ============================================
@@ -365,6 +369,12 @@ int main(int argc, char** argv) {
     nc_init();
     
     printf("=== Nocta MNIST CNN+BatchNorm Example ===\n\n");
+
+    #ifdef NOCTA_OPENMP_ENABLED
+    printf("OpenMP Enabled. Max threads: %d\n\n", omp_get_max_threads());
+    #else
+    printf("OpenMP Disabled.\n\n");
+    #endif
     
     // Load data
     mnist_dataset *train = NULL, *test = NULL;
@@ -387,7 +397,7 @@ int main(int argc, char** argv) {
     
     // Training
     double lr = 0.01;
-    size_t epochs = 20, batch_size = 32;
+    size_t epochs = 5, batch_size = 64;
     printf("Training: lr=%.3f, batch=%zu, epochs=%zu\n\n", lr, batch_size, epochs);
     
     for (size_t e = 0; e < epochs; e++) {

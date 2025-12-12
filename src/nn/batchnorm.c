@@ -5,6 +5,10 @@
 #include <math.h>
 #include <string.h>
 
+#ifdef NOCTA_OPENMP_ENABLED
+#include <omp.h>
+#endif
+
 // ============================================
 // BatchNorm2D Extra Data
 // ============================================
@@ -54,7 +58,12 @@ nc_tensor** nc_backward_batchnorm2d(nc_tensor* grad, nc_tensor** saved, size_t n
     size_t bias_shape[] = {C};
     grads[2] = nc_tensor_zeros(bias_shape, 1, input->dtype);
     
-    for (size_t c = 0; c < C; c++) {
+    int c;
+    (void)c;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (c = 0; c < (int)C; c++) {
         double mu = nc_tensor_get1(mean, c);
         double v = nc_tensor_get1(var, c);
         double std = sqrt(v + eps);
@@ -64,7 +73,6 @@ nc_tensor** nc_backward_batchnorm2d(nc_tensor* grad, nc_tensor** saved, size_t n
         // Accumulate for this channel
         double sum_grad = 0.0;
         double sum_grad_xhat = 0.0;
-        double sum_grad_xhat_xhat = 0.0;
         
         // First pass: compute sums
         for (size_t b = 0; b < N; b++) {
@@ -150,7 +158,12 @@ nc_tensor* nc_batchnorm2d_forward_fn(
         return NULL;
     }
     
-    for (size_t c = 0; c < C; c++) {
+    int c;
+    (void)c;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (c = 0; c < (int)C; c++) {
         double mean_val, var_val;
         
         if (training) {
@@ -179,6 +192,8 @@ nc_tensor* nc_batchnorm2d_forward_fn(
             
             // Update running statistics
             if (running_mean && running_var) {
+                // Note: running stats update is not thread-safe if multiple threads update the same index.
+                // But here each thread works on a different 'c', so it is safe.
                 double rm = nc_tensor_get1(running_mean, c);
                 double rv = nc_tensor_get1(running_var, c);
                 nc_tensor_set1(running_mean, c, (1.0 - momentum) * rm + momentum * mean_val);
@@ -375,7 +390,12 @@ nc_tensor** nc_backward_batchnorm1d(nc_tensor* grad, nc_tensor** saved, size_t n
     size_t bias_shape[] = {C};
     grads[2] = nc_tensor_zeros(bias_shape, 1, input->dtype);
     
-    for (size_t c = 0; c < C; c++) {
+    int c;
+    (void)c;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (c = 0; c < (int)C; c++) {
         double mu = nc_tensor_get1(mean, c);
         double v = nc_tensor_get1(var, c);
         double inv_std = 1.0 / sqrt(v + eps);
@@ -457,7 +477,12 @@ nc_tensor** nc_backward_layernorm(nc_tensor* grad, nc_tensor** saved, size_t n) 
         grads[2] = nc_tensor_zeros(w_shape, 1, input->dtype);
     }
     
-    for (size_t o = 0; o < outer_size; o++) {
+    int o;
+    (void)o;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (o = 0; o < (int)outer_size; o++) {
         // Compute mean and var for this instance
         double sum = 0.0;
         for (size_t i = 0; i < norm_size; i++) {
@@ -488,10 +513,33 @@ nc_tensor** nc_backward_layernorm(nc_tensor* grad, nc_tensor** saved, size_t n) 
             
             // Accumulate weight/bias gradients
             if (weight) {
-                double cur_dw = nc_tensor_get_flat(grads[1], i);
-                nc_tensor_set_flat(grads[1], i, cur_dw + g * x_hat);
-                double cur_db = nc_tensor_get_flat(grads[2], i);
-                nc_tensor_set_flat(grads[2], i, cur_db + g);
+                if (grads[1]->dtype == NC_F32) {
+                    float* w_data = nc_tensor_data_f32(grads[1]);
+                    float* b_data = nc_tensor_data_f32(grads[2]);
+                    
+                    #ifdef NOCTA_OPENMP_ENABLED
+                    #pragma omp atomic
+                    #endif
+                    w_data[i] += (float)(g * x_hat);
+                    
+                    #ifdef NOCTA_OPENMP_ENABLED
+                    #pragma omp atomic
+                    #endif
+                    b_data[i] += (float)g;
+                } else {
+                    double* w_data = nc_tensor_data_f64(grads[1]);
+                    double* b_data = nc_tensor_data_f64(grads[2]);
+                    
+                    #ifdef NOCTA_OPENMP_ENABLED
+                    #pragma omp atomic
+                    #endif
+                    w_data[i] += g * x_hat;
+                    
+                    #ifdef NOCTA_OPENMP_ENABLED
+                    #pragma omp atomic
+                    #endif
+                    b_data[i] += g;
+                }
             }
         }
         
@@ -550,7 +598,12 @@ nc_tensor* nc_batchnorm1d_forward_fn(
         return NULL;
     }
     
-    for (size_t c = 0; c < C; c++) {
+    int c;
+    (void)c;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (c = 0; c < (int)C; c++) {
         double mean_val, var_val;
         
         if (training) {
@@ -704,7 +757,12 @@ nc_tensor* nc_layernorm_forward_fn(
     nc_tensor* out = nc_tensor_empty(input->shape, input->ndim, input->dtype);
     if (!out) return NULL;
     
-    for (size_t o = 0; o < outer_size; o++) {
+    int o;
+    (void)o;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (o = 0; o < (int)outer_size; o++) {
         // Compute mean
         double sum = 0.0;
         for (size_t i = 0; i < norm_size; i++) {
@@ -800,20 +858,20 @@ nc_module* nc_layernorm(const size_t* normalized_shape, size_t ndim) {
     m->free_extra = nc_free;
     m->forward = layernorm_forward;
     
-    // Create weight and bias with flat shape
-    size_t flat_shape[] = {total_size};
-    nc_tensor* weight = nc_tensor_ones(flat_shape, 1, NC_F32);
-    nc_tensor* bias = nc_tensor_zeros(flat_shape, 1, NC_F32);
+    size_t shape[] = {total_size};
     
-    if (!weight || !bias) {
-        nc_tensor_free(weight);
-        nc_tensor_free(bias);
-        nc_module_free(m);
-        return NULL;
+    if (data->elementwise_affine) {
+        nc_tensor* weight = nc_tensor_ones(shape, 1, NC_F32);
+        nc_tensor* bias = nc_tensor_zeros(shape, 1, NC_F32);
+        if (!weight || !bias) {
+            nc_tensor_free(weight);
+            nc_tensor_free(bias);
+            nc_module_free(m);
+            return NULL;
+        }
+        nc_module_add_param(m, "weight", weight);
+        nc_module_add_param(m, "bias", bias);
     }
-    
-    nc_module_add_param(m, "weight", weight);
-    nc_module_add_param(m, "bias", bias);
     
     return m;
 }

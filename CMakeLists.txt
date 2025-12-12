@@ -1,12 +1,24 @@
 cmake_minimum_required(VERSION 3.16)
-project(nocta VERSION 0.3.0 LANGUAGES C)
+project(nocta VERSION 0.4.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # Options
 option(NOCTA_BUILD_EXAMPLES "Build examples" ON)
-option(NOCTA_ENABLE_SIMD "Enable SIMD optimizations" OFF)
+option(NOCTA_ENABLE_SIMD "Enable SIMD optimizations" ON)
+option(NOCTA_ENABLE_OPENMP "Enable OpenMP multi-threading" ON)
+
+# Find OpenMP
+if(NOCTA_ENABLE_OPENMP)
+    find_package(OpenMP)
+    if(OpenMP_C_FOUND)
+        add_compile_definitions(NOCTA_OPENMP_ENABLED)
+    else()
+        message(WARNING "OpenMP not found, disabling multi-threading")
+        set(NOCTA_ENABLE_OPENMP OFF)
+    endif()
+endif()
 
 # Compiler flags
 if(MSVC)
@@ -14,6 +26,9 @@ if(MSVC)
     if(NOCTA_ENABLE_SIMD)
         add_compile_options(/arch:AVX2)
         add_compile_definitions(NOCTA_SIMD_ENABLED)
+    endif()
+    if(NOCTA_ENABLE_OPENMP)
+        add_compile_options(/openmp)
     endif()
 else()
     add_compile_options(-Wall -Wextra)
@@ -25,6 +40,9 @@ else()
     if(NOCTA_ENABLE_SIMD)
         add_compile_options(-mavx2 -mfma)
         add_compile_definitions(NOCTA_SIMD_ENABLED)
+    endif()
+    if(NOCTA_ENABLE_OPENMP)
+        add_compile_options(-fopenmp)
     endif()
 endif()
 

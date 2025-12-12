@@ -6,6 +6,10 @@
 #include <string.h>
 #include <stdlib.h>
 
+#ifdef NOCTA_OPENMP_ENABLED
+#include <omp.h>
+#endif
+
 // ============================================
 // Conv2D Extra Data
 // ============================================
@@ -60,7 +64,13 @@ nc_tensor** nc_backward_conv2d(nc_tensor* grad, nc_tensor** saved, size_t n) {
         // dL/db = sum over (N, H_out, W_out) of grad
         for (size_t c = 0; c < C_out; c++) {
             double sum = 0.0;
-            for (size_t b = 0; b < N; b++) {
+            // Parallelize reduction
+            int b;
+            (void)b;
+            #ifdef NOCTA_OPENMP_ENABLED
+            #pragma omp parallel for reduction(+:sum)
+            #endif
+            for (b = 0; b < (int)N; b++) {
                 for (size_t h = 0; h < H_out; h++) {
                     for (size_t w = 0; w < W_out; w++) {
                         sum += nc_tensor_get4(grad, b, c, h, w);
@@ -72,11 +82,16 @@ nc_tensor** nc_backward_conv2d(nc_tensor* grad, nc_tensor** saved, size_t n) {
     }
     
     // Compute gradients
-    for (size_t b = 0; b < N; b++) {
+    int b_idx;
+    (void)b_idx;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (b_idx = 0; b_idx < (int)N; b_idx++) {
         for (size_t c_out = 0; c_out < C_out; c_out++) {
             for (size_t h_out = 0; h_out < H_out; h_out++) {
                 for (size_t w_out = 0; w_out < W_out; w_out++) {
-                    double grad_val = nc_tensor_get4(grad, b, c_out, h_out, w_out);
+                    double grad_val = nc_tensor_get4(grad, b_idx, c_out, h_out, w_out);
                     
                     for (size_t c_in = 0; c_in < C_in; c_in++) {
                         for (size_t kh = 0; kh < kH; kh++) {
@@ -87,15 +102,30 @@ nc_tensor** nc_backward_conv2d(nc_tensor* grad, nc_tensor** saved, size_t n) {
                                 if (h_in >= 0 && h_in < (int)H && 
                                     w_in >= 0 && w_in < (int)W) {
                                     // dL/dW
-                                    double inp = nc_tensor_get4(input, b, c_in, h_in, w_in);
-                                    double cur_dw = nc_tensor_get4(grads[1], c_out, c_in, kh, kw);
-                                    nc_tensor_set4(grads[1], c_out, c_in, kh, kw, 
-                                                   cur_dw + grad_val * inp);
+                                    double inp = nc_tensor_get4(input, b_idx, c_in, h_in, w_in);
+                                    
+                                    // Atomic update for weight gradient
+                                    double dw_contrib = grad_val * inp;
+                                    size_t w_idx = ((c_out * C_in + c_in) * kH + kh) * kW + kw;
+                                    
+                                    if (grads[1]->dtype == NC_F32) {
+                                        float* data = nc_tensor_data_f32(grads[1]);
+                                        #ifdef NOCTA_OPENMP_ENABLED
+                                        #pragma omp atomic
+                                        #endif
+                                        data[w_idx] += (float)dw_contrib;
+                                    } else {
+                                        double* data = nc_tensor_data_f64(grads[1]);
+                                        #ifdef NOCTA_OPENMP_ENABLED
+                                        #pragma omp atomic
+                                        #endif
+                                        data[w_idx] += dw_contrib;
+                                    }
                                     
                                     // dL/dX
                                     double w = nc_tensor_get4(weight, c_out, c_in, kh, kw);
-                                    double cur_dx = nc_tensor_get4(grads[0], b, c_in, h_in, w_in);
-                                    nc_tensor_set4(grads[0], b, c_in, h_in, w_in,
+                                    double cur_dx = nc_tensor_get4(grads[0], b_idx, c_in, h_in, w_in);
+                                    nc_tensor_set4(grads[0], b_idx, c_in, h_in, w_in,
                                                    cur_dx + grad_val * w);
                                 }
                             }
@@ -143,8 +173,13 @@ nc_tensor* nc_conv2d_forward(nc_tensor* input, nc_tensor* weight,
     if (!out) return NULL;
     
     // Convolution
-    for (size_t b = 0; b < N; b++) {
-        for (size_t c_out = 0; c_out < C_out; c_out++) {
+    int b;
+    (void)b;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (b = 0; b < (int)N; b++) {
+        for (int c_out = 0; c_out < (int)C_out; c_out++) {
             for (size_t h_out = 0; h_out < H_out; h_out++) {
                 for (size_t w_out = 0; w_out < W_out; w_out++) {
                     double sum = 0.0;
@@ -320,7 +355,12 @@ nc_tensor** nc_backward_maxpool2d(nc_tensor* grad, nc_tensor** saved, size_t n) 
     
     grads[0] = nc_tensor_zeros(input->shape, input->ndim, input->dtype);
     
-    for (size_t b = 0; b < N; b++) {
+    int b;
+    (void)b;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (b = 0; b < (int)N; b++) {
         for (size_t c = 0; c < C; c++) {
             for (size_t h_out = 0; h_out < H_out; h_out++) {
                 for (size_t w_out = 0; w_out < W_out; w_out++) {
@@ -372,8 +412,13 @@ nc_tensor* nc_maxpool2d_forward(nc_tensor* input, size_t kernel_size, size_t str
     nc_tensor* out = nc_tensor_empty(out_shape, 4, input->dtype);
     if (!out) return NULL;
     
-    for (size_t b = 0; b < N; b++) {
-        for (size_t c = 0; c < C; c++) {
+    int b;
+    (void)b;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (b = 0; b < (int)N; b++) {
+        for (int c = 0; c < (int)C; c++) {
             for (size_t h_out = 0; h_out < H_out; h_out++) {
                 for (size_t w_out = 0; w_out < W_out; w_out++) {
                     double max_val = -1e30;
@@ -463,8 +508,13 @@ nc_tensor* nc_avgpool2d_forward(nc_tensor* input, size_t kernel_size, size_t str
     
     double pool_size = (double)(kernel_size * kernel_size);
     
-    for (size_t b = 0; b < N; b++) {
-        for (size_t c = 0; c < C; c++) {
+    int b;
+    (void)b;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (b = 0; b < (int)N; b++) {
+        for (int c = 0; c < (int)C; c++) {
             for (size_t h_out = 0; h_out < H_out; h_out++) {
                 for (size_t w_out = 0; w_out < W_out; w_out++) {
                     double sum = 0.0;

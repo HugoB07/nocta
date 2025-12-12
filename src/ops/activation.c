@@ -4,6 +4,10 @@
 #include "nocta/autograd/backward.h"
 #include <math.h>
 
+#ifdef NOCTA_OPENMP_ENABLED
+#include <omp.h>
+#endif
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -22,7 +26,12 @@ nc_tensor** nc_backward_relu(nc_tensor* grad, nc_tensor** inputs, size_t n) {
     if (!grads[0]) { free(grads); return NULL; }
     
     // d(relu)/dx = 1 if x > 0, else 0
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         double xi = nc_tensor_get_flat(x, i);
         double gi = nc_tensor_get_flat(grad, i);
         nc_tensor_set_flat(grads[0], i, xi > 0 ? gi : 0);
@@ -44,7 +53,12 @@ nc_tensor** nc_backward_sigmoid(nc_tensor* grad, nc_tensor** inputs, size_t n) {
     grads[0] = nc_tensor_empty(x->shape, x->ndim, x->dtype);
     if (!grads[0]) { free(grads); return NULL; }
     
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         double s;
         if (sig_out) {
             s = nc_tensor_get_flat(sig_out, i);
@@ -70,7 +84,12 @@ nc_tensor** nc_backward_tanh(nc_tensor* grad, nc_tensor** inputs, size_t n) {
     if (!grads[0]) { free(grads); return NULL; }
     
     // d(tanh)/dx = 1 - tanh(x)^2
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         double t = tanh(nc_tensor_get_flat(x, i));
         double gi = nc_tensor_get_flat(grad, i);
         nc_tensor_set_flat(grads[0], i, gi * (1.0 - t * t));
@@ -94,7 +113,12 @@ nc_tensor** nc_backward_softmax(nc_tensor* grad, nc_tensor** inputs, size_t n) {
     size_t batch_size = (grad->ndim > 1) ? grad->numel / grad->shape[grad->ndim - 1] : 1;
     size_t dim_size = grad->shape[grad->ndim - 1];
     
-    for (size_t b = 0; b < batch_size; b++) {
+    int b;
+    (void)b;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (b = 0; b < (int)batch_size; b++) {
         double dot = 0.0;
         for (size_t i = 0; i < dim_size; i++) {
             size_t idx = b * dim_size + i;
@@ -145,7 +169,12 @@ nc_tensor* nc_relu(nc_tensor* x) {
     nc_tensor* out = nc_tensor_empty(x->shape, x->ndim, x->dtype);
     if (!out) return NULL;
     
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         double v = nc_tensor_get_flat(x, i);
         nc_tensor_set_flat(out, i, v > 0 ? v : 0);
     }
@@ -160,7 +189,12 @@ nc_tensor* nc_leaky_relu(nc_tensor* x, double alpha) {
     nc_tensor* out = nc_tensor_empty(x->shape, x->ndim, x->dtype);
     if (!out) return NULL;
     
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         double v = nc_tensor_get_flat(x, i);
         nc_tensor_set_flat(out, i, v > 0 ? v : alpha * v);
     }
@@ -174,7 +208,12 @@ nc_tensor* nc_elu(nc_tensor* x, double alpha) {
     nc_tensor* out = nc_tensor_empty(x->shape, x->ndim, x->dtype);
     if (!out) return NULL;
     
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         double v = nc_tensor_get_flat(x, i);
         nc_tensor_set_flat(out, i, v > 0 ? v : alpha * (exp(v) - 1));
     }
@@ -192,7 +231,12 @@ nc_tensor* nc_selu(nc_tensor* x) {
     nc_tensor* out = nc_tensor_empty(x->shape, x->ndim, x->dtype);
     if (!out) return NULL;
     
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         double v = nc_tensor_get_flat(x, i);
         double r = v > 0 ? v : alpha * (exp(v) - 1);
         nc_tensor_set_flat(out, i, scale * r);
@@ -209,7 +253,12 @@ nc_tensor* nc_gelu(nc_tensor* x) {
     
     const double c = sqrt(2.0 / M_PI);
     
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         double v = nc_tensor_get_flat(x, i);
         // GELU approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
         double inner = c * (v + 0.044715 * v * v * v);
@@ -225,7 +274,12 @@ nc_tensor* nc_sigmoid(nc_tensor* x) {
     nc_tensor* out = nc_tensor_empty(x->shape, x->ndim, x->dtype);
     if (!out) return NULL;
     
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         double v = nc_tensor_get_flat(x, i);
         nc_tensor_set_flat(out, i, 1.0 / (1.0 + exp(-v)));
     }
@@ -241,7 +295,12 @@ nc_tensor* nc_tanh_act(nc_tensor* x) {
     nc_tensor* out = nc_tensor_empty(x->shape, x->ndim, x->dtype);
     if (!out) return NULL;
     
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         nc_tensor_set_flat(out, i, tanh(nc_tensor_get_flat(x, i)));
     }
     
@@ -267,7 +326,12 @@ nc_tensor* nc_softmax(nc_tensor* x, int dim) {
     for (size_t i = 0; i < (size_t)dim; i++) outer_size *= x->shape[i];
     for (size_t i = (size_t)dim + 1; i < x->ndim; i++) inner_size *= x->shape[i];
     
-    for (size_t o = 0; o < outer_size; o++) {
+    int o;
+    (void)o;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (o = 0; o < (int)outer_size; o++) {
         for (size_t in = 0; in < inner_size; in++) {
             // Find max for numerical stability
             double max_val = -INFINITY;
@@ -316,7 +380,12 @@ nc_tensor* nc_log_softmax(nc_tensor* x, int dim) {
     for (size_t i = 0; i < (size_t)dim; i++) outer_size *= x->shape[i];
     for (size_t i = (size_t)dim + 1; i < x->ndim; i++) inner_size *= x->shape[i];
     
-    for (size_t o = 0; o < outer_size; o++) {
+    int o;
+    (void)o;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (o = 0; o < (int)outer_size; o++) {
         for (size_t in = 0; in < inner_size; in++) {
             // Find max
             double max_val = -INFINITY;
@@ -351,7 +420,12 @@ nc_tensor* nc_swish(nc_tensor* x) {
     nc_tensor* out = nc_tensor_empty(x->shape, x->ndim, x->dtype);
     if (!out) return NULL;
     
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         double v = nc_tensor_get_flat(x, i);
         nc_tensor_set_flat(out, i, v / (1.0 + exp(-v)));
     }
@@ -369,7 +443,12 @@ nc_tensor* nc_mish(nc_tensor* x) {
     nc_tensor* out = nc_tensor_empty(x->shape, x->ndim, x->dtype);
     if (!out) return NULL;
     
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         double v = nc_tensor_get_flat(x, i);
         double sp = log(1.0 + exp(v));  // softplus
         nc_tensor_set_flat(out, i, v * tanh(sp));
@@ -388,7 +467,12 @@ nc_tensor* nc_relu6(nc_tensor* x) {
 
 void nc_relu_(nc_tensor* x) {
     if (!x) return;
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         double v = nc_tensor_get_flat(x, i);
         if (v < 0) nc_tensor_set_flat(x, i, 0);
     }
@@ -396,7 +480,12 @@ void nc_relu_(nc_tensor* x) {
 
 void nc_sigmoid_(nc_tensor* x) {
     if (!x) return;
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         double v = nc_tensor_get_flat(x, i);
         nc_tensor_set_flat(x, i, 1.0 / (1.0 + exp(-v)));
     }
@@ -404,7 +493,12 @@ void nc_sigmoid_(nc_tensor* x) {
 
 void nc_tanh_(nc_tensor* x) {
     if (!x) return;
-    for (size_t i = 0; i < x->numel; i++) {
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)x->numel; i++) {
         nc_tensor_set_flat(x, i, tanh(nc_tensor_get_flat(x, i)));
     }
 }
