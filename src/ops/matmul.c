@@ -8,6 +8,10 @@
 #include <omp.h>
 #endif
 
+#ifdef NOCTA_SIMD_ENABLED
+#include <immintrin.h>
+#endif
+
 // ============================================
 // Backward
 // ============================================
@@ -47,6 +51,10 @@ nc_tensor** nc_backward_matmul(nc_tensor* grad, nc_tensor** saved, size_t n) {
 // Core matmul implementation
 // ============================================
 
+#define MC 256
+#define KC 256
+#define NC 1024
+
 static nc_tensor* matmul_2d(nc_tensor* a, nc_tensor* b) {
     size_t M = a->shape[0];
     size_t K = a->shape[1];
@@ -73,38 +81,248 @@ static nc_tensor* matmul_2d(nc_tensor* a, nc_tensor* b) {
         return NULL;
     }
 
-    // Optimized implementation using raw pointers and IKJ loop order
     if (dtype == NC_F32) {
         float* ap = nc_tensor_data_f32(a_cont);
         float* bp = nc_tensor_data_f32(b_cont);
         float* cp = nc_tensor_data_f32(out);
         
-        int i;
-        #ifdef NOCTA_OPENMP_ENABLED
-        #pragma omp parallel for
-        #endif
-        for (i = 0; i < (int)M; i++) {
-            for (size_t k = 0; k < K; k++) {
-                float a_val = ap[i * K + k];
-                for (size_t j = 0; j < N; j++) {
-                    cp[i * N + j] += a_val * bp[k * N + j];
+        int i, j, p;
+        
+        // Heuristic: If M is small and N is large, parallelize N
+        if (M < 64 && N > 256) {
+            #ifdef NOCTA_OPENMP_ENABLED
+            #pragma omp parallel for private(i, p) schedule(dynamic)
+            #endif
+            for (j = 0; j < (int)N; j += NC) {
+                int jb = (j + NC < (int)N) ? NC : ((int)N - j);
+                for (i = 0; i < (int)M; i += MC) {
+                    int ib = (i + MC < (int)M) ? MC : ((int)M - i);
+                    for (p = 0; p < (int)K; p += KC) {
+                        int pb = (p + KC < (int)K) ? KC : ((int)K - p);
+                        
+                        // Micro-kernel loops
+                        for (int ii = 0; ii < ib; ii += 8) {
+                            for (int jj = 0; jj < jb; jj += 8) {
+                                if (ii + 8 <= ib && jj + 8 <= jb) {
+                                    float* c_ptr = cp + (i + ii) * N + (j + jj);
+                                    
+                                    #ifdef NOCTA_SIMD_ENABLED
+                                    __m256 c[8];
+                                    for (int r = 0; r < 8; r++) c[r] = _mm256_loadu_ps(c_ptr + r * N);
+                                    
+                                    for (int k = 0; k < pb; k++) {
+                                        __m256 b_vec = _mm256_loadu_ps(bp + (p + k) * N + (j + jj));
+                                        for (int r = 0; r < 8; r++) {
+                                            __m256 a_val = _mm256_set1_ps(ap[(i + ii + r) * K + (p + k)]);
+                                            c[r] = _mm256_fmadd_ps(a_val, b_vec, c[r]);
+                                        }
+                                    }
+                                    
+                                    for (int r = 0; r < 8; r++) _mm256_storeu_ps(c_ptr + r * N, c[r]);
+                                    #else
+                                    // Scalar fallback
+                                    for (int r = 0; r < 8; r++) {
+                                        for (int k = 0; k < pb; k++) {
+                                            float a_val = ap[(i + ii + r) * K + (p + k)];
+                                            for (int c = 0; c < 8; c++) {
+                                                c_ptr[r * N + c] += a_val * bp[(p + k) * N + (j + jj + c)];
+                                            }
+                                        }
+                                    }
+                                    #endif
+                                } else {
+                                    // Edge cases (scalar)
+                                    for (int ii2 = ii; ii2 < ii + 8 && ii2 < ib; ii2++) {
+                                        for (int jj2 = jj; jj2 < jj + 8 && jj2 < jb; jj2++) {
+                                            float sum = 0.0f;
+                                            for (int k = 0; k < pb; k++) {
+                                                sum += ap[(i + ii2) * K + (p + k)] * bp[(p + k) * N + (j + jj2)];
+                                            }
+                                            cp[(i + ii2) * N + (j + jj2)] += sum;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Original parallel M
+            #ifdef NOCTA_OPENMP_ENABLED
+            #pragma omp parallel for private(j, p) schedule(dynamic)
+            #endif
+            for (i = 0; i < (int)M; i += MC) {
+                int ib = (i + MC < (int)M) ? MC : ((int)M - i);
+                
+                for (p = 0; p < (int)K; p += KC) {
+                    int pb = (p + KC < (int)K) ? KC : ((int)K - p);
+                    
+                    for (j = 0; j < (int)N; j += NC) {
+                        int jb = (j + NC < (int)N) ? NC : ((int)N - j);
+                        
+                        // Micro-kernel loops
+                        for (int ii = 0; ii < ib; ii += 8) {
+                            for (int jj = 0; jj < jb; jj += 8) {
+                                if (ii + 8 <= ib && jj + 8 <= jb) {
+                                    float* c_ptr = cp + (i + ii) * N + (j + jj);
+                                    
+                                    #ifdef NOCTA_SIMD_ENABLED
+                                    __m256 c[8];
+                                    for (int r = 0; r < 8; r++) c[r] = _mm256_loadu_ps(c_ptr + r * N);
+                                    
+                                    for (int k = 0; k < pb; k++) {
+                                        __m256 b_vec = _mm256_loadu_ps(bp + (p + k) * N + (j + jj));
+                                        
+                                        for (int r = 0; r < 8; r++) {
+                                            __m256 a_val = _mm256_set1_ps(ap[(i + ii + r) * K + (p + k)]);
+                                            c[r] = _mm256_fmadd_ps(a_val, b_vec, c[r]);
+                                        }
+                                    }
+                                    
+                                    for (int r = 0; r < 8; r++) _mm256_storeu_ps(c_ptr + r * N, c[r]);
+                                    #else
+                                    // Scalar fallback
+                                    for (int r = 0; r < 8; r++) {
+                                        for (int k = 0; k < pb; k++) {
+                                            float a_val = ap[(i + ii + r) * K + (p + k)];
+                                            for (int c = 0; c < 8; c++) {
+                                                c_ptr[r * N + c] += a_val * bp[(p + k) * N + (j + jj + c)];
+                                            }
+                                        }
+                                    }
+                                    #endif
+                                } else {
+                                    // Edge cases (scalar)
+                                    for (int ii2 = ii; ii2 < ii + 8 && ii2 < ib; ii2++) {
+                                        for (int jj2 = jj; jj2 < jj + 8 && jj2 < jb; jj2++) {
+                                            float sum = 0.0f;
+                                            for (int k = 0; k < pb; k++) {
+                                                sum += ap[(i + ii2) * K + (p + k)] * bp[(p + k) * N + (j + jj2)];
+                                            }
+                                            cp[(i + ii2) * N + (j + jj2)] += sum;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
+        
     } else {
+        // F64 Implementation
         double* ap = nc_tensor_data_f64(a_cont);
         double* bp = nc_tensor_data_f64(b_cont);
         double* cp = nc_tensor_data_f64(out);
         
-        int i;
-        #ifdef NOCTA_OPENMP_ENABLED
-        #pragma omp parallel for
-        #endif
-        for (i = 0; i < (int)M; i++) {
-            for (size_t k = 0; k < K; k++) {
-                double a_val = ap[i * K + k];
-                for (size_t j = 0; j < N; j++) {
-                    cp[i * N + j] += a_val * bp[k * N + j];
+        int i, j, p;
+        
+        if (M < 64 && N > 256) {
+            #ifdef NOCTA_OPENMP_ENABLED
+            #pragma omp parallel for private(i, p) schedule(dynamic)
+            #endif
+            for (j = 0; j < (int)N; j += NC) {
+                int jb = (j + NC < (int)N) ? NC : ((int)N - j);
+                for (i = 0; i < (int)M; i += MC) {
+                    int ib = (i + MC < (int)M) ? MC : ((int)M - i);
+                    for (p = 0; p < (int)K; p += KC) {
+                        int pb = (p + KC < (int)K) ? KC : ((int)K - p);
+                        for (int ii = 0; ii < ib; ii += 4) {
+                            for (int jj = 0; jj < jb; jj += 4) {
+                                if (ii + 4 <= ib && jj + 4 <= jb) {
+                                    double* c_ptr = cp + (i + ii) * N + (j + jj);
+                                    #ifdef NOCTA_SIMD_ENABLED
+                                    __m256d c[4];
+                                    for (int r = 0; r < 4; r++) c[r] = _mm256_loadu_pd(c_ptr + r * N);
+                                    for (int k = 0; k < pb; k++) {
+                                        __m256d b_vec = _mm256_loadu_pd(bp + (p + k) * N + (j + jj));
+                                        for (int r = 0; r < 4; r++) {
+                                            __m256d a_val = _mm256_set1_pd(ap[(i + ii + r) * K + (p + k)]);
+                                            c[r] = _mm256_fmadd_pd(a_val, b_vec, c[r]);
+                                        }
+                                    }
+                                    for (int r = 0; r < 4; r++) _mm256_storeu_pd(c_ptr + r * N, c[r]);
+                                    #else
+                                    for (int r = 0; r < 4; r++) {
+                                        for (int k = 0; k < pb; k++) {
+                                            double a_val = ap[(i + ii + r) * K + (p + k)];
+                                            for (int c = 0; c < 4; c++) {
+                                                c_ptr[r * N + c] += a_val * bp[(p + k) * N + (j + jj + c)];
+                                            }
+                                        }
+                                    }
+                                    #endif
+                                } else {
+                                    for (int ii2 = ii; ii2 < ii + 4 && ii2 < ib; ii2++) {
+                                        for (int jj2 = jj; jj2 < jj + 4 && jj2 < jb; jj2++) {
+                                            double sum = 0.0;
+                                            for (int k = 0; k < pb; k++) {
+                                                sum += ap[(i + ii2) * K + (p + k)] * bp[(p + k) * N + (j + jj2)];
+                                            }
+                                            cp[(i + ii2) * N + (j + jj2)] += sum;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            #ifdef NOCTA_OPENMP_ENABLED
+            #pragma omp parallel for private(j, p) schedule(dynamic)
+            #endif
+            for (i = 0; i < (int)M; i += MC) {
+                int ib = (i + MC < (int)M) ? MC : ((int)M - i);
+                for (p = 0; p < (int)K; p += KC) {
+                    int pb = (p + KC < (int)K) ? KC : ((int)K - p);
+                    for (j = 0; j < (int)N; j += NC) {
+                        int jb = (j + NC < (int)N) ? NC : ((int)N - j);
+                        
+                        for (int ii = 0; ii < ib; ii += 4) {
+                            for (int jj = 0; jj < jb; jj += 4) {
+                                if (ii + 4 <= ib && jj + 4 <= jb) {
+                                    double* c_ptr = cp + (i + ii) * N + (j + jj);
+                                    
+                                    #ifdef NOCTA_SIMD_ENABLED
+                                    __m256d c[4];
+                                    for (int r = 0; r < 4; r++) c[r] = _mm256_loadu_pd(c_ptr + r * N);
+                                    
+                                    for (int k = 0; k < pb; k++) {
+                                        __m256d b_vec = _mm256_loadu_pd(bp + (p + k) * N + (j + jj));
+                                        for (int r = 0; r < 4; r++) {
+                                            __m256d a_val = _mm256_set1_pd(ap[(i + ii + r) * K + (p + k)]);
+                                            c[r] = _mm256_fmadd_pd(a_val, b_vec, c[r]);
+                                        }
+                                    }
+                                    for (int r = 0; r < 4; r++) _mm256_storeu_pd(c_ptr + r * N, c[r]);
+                                    #else
+                                    for (int r = 0; r < 4; r++) {
+                                        for (int k = 0; k < pb; k++) {
+                                            double a_val = ap[(i + ii + r) * K + (p + k)];
+                                            for (int c = 0; c < 4; c++) {
+                                                c_ptr[r * N + c] += a_val * bp[(p + k) * N + (j + jj + c)];
+                                            }
+                                        }
+                                    }
+                                    #endif
+                                } else {
+                                    // Edge cases
+                                    for (int ii2 = ii; ii2 < ii + 4 && ii2 < ib; ii2++) {
+                                        for (int jj2 = jj; jj2 < jj + 4 && jj2 < jb; jj2++) {
+                                            double sum = 0.0;
+                                            for (int k = 0; k < pb; k++) {
+                                                sum += ap[(i + ii2) * K + (p + k)] * bp[(p + k) * N + (j + jj2)];
+                                            }
+                                            cp[(i + ii2) * N + (j + jj2)] += sum;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

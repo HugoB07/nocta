@@ -2,9 +2,11 @@
 #include "nocta/core/memory.h"
 #include "nocta/autograd/node.h"
 #include "nocta/autograd/backward.h"
+#include "nocta/ops/matmul.h"
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 #ifdef NOCTA_OPENMP_ENABLED
 #include <omp.h>
@@ -22,6 +24,78 @@ typedef struct {
     size_t padding;
     bool has_bias;
 } nc_conv2d_data;
+
+// ============================================
+// Im2Col Implementation
+// ============================================
+
+static void im2col(const float* data_im, int channels, int height, int width,
+                   int kernel_h, int kernel_w, int pad, int stride,
+                   float* data_col, int col_stride) {
+    int height_col = (height + 2 * pad - kernel_h) / stride + 1;
+    int width_col = (width + 2 * pad - kernel_w) / stride + 1;
+    int channels_col = channels * kernel_h * kernel_w;
+    
+    int c;
+    (void)c;
+    // No OpenMP here, we parallelize over batch
+    for (c = 0; c < channels_col; ++c) {
+        int w_offset = c % kernel_w;
+        int h_offset = (c / kernel_w) % kernel_h;
+        int c_im = c / kernel_h / kernel_w;
+        
+        for (int h = 0; h < height_col; ++h) {
+            for (int w = 0; w < width_col; ++w) {
+                int im_row = h_offset + h * stride;
+                int im_col = w_offset + w * stride;
+                // We use col_stride for the channel dimension
+                int col_index = c * col_stride + h * width_col + w;
+                
+                im_row -= pad;
+                im_col -= pad;
+                
+                if (im_row >= 0 && im_col >= 0 && im_row < height && im_col < width) {
+                    data_col[col_index] = data_im[(c_im * height + im_row) * width + im_col];
+                } else {
+                    data_col[col_index] = 0;
+                }
+            }
+        }
+    }
+}
+
+static void im2col_f64(const double* data_im, int channels, int height, int width,
+                       int kernel_h, int kernel_w, int pad, int stride,
+                       double* data_col, int col_stride) {
+    int height_col = (height + 2 * pad - kernel_h) / stride + 1;
+    int width_col = (width + 2 * pad - kernel_w) / stride + 1;
+    int channels_col = channels * kernel_h * kernel_w;
+    
+    int c;
+    (void)c;
+    for (c = 0; c < channels_col; ++c) {
+        int w_offset = c % kernel_w;
+        int h_offset = (c / kernel_w) % kernel_h;
+        int c_im = c / kernel_h / kernel_w;
+        
+        for (int h = 0; h < height_col; ++h) {
+            for (int w = 0; w < width_col; ++w) {
+                int im_row = h_offset + h * stride;
+                int im_col = w_offset + w * stride;
+                int col_index = c * col_stride + h * width_col + w;
+                
+                im_row -= pad;
+                im_col -= pad;
+                
+                if (im_row >= 0 && im_col >= 0 && im_row < height && im_col < width) {
+                    data_col[col_index] = data_im[(c_im * height + im_row) * width + im_col];
+                } else {
+                    data_col[col_index] = 0;
+                }
+            }
+        }
+    }
+}
 
 // ============================================
 // Conv2D Backward
@@ -245,7 +319,7 @@ nc_tensor** nc_backward_conv2d(nc_tensor* grad, nc_tensor** saved, size_t n) {
 }
 
 // ============================================
-// Conv2D Forward (Functional)
+// Conv2D Forward (Im2Col + GEMM)
 // ============================================
 
 nc_tensor* nc_conv2d_forward(nc_tensor* input, nc_tensor* weight, 
@@ -277,102 +351,106 @@ nc_tensor* nc_conv2d_forward(nc_tensor* input, nc_tensor* weight,
     nc_tensor* out = nc_tensor_zeros(out_shape, 4, input->dtype);
     if (!out) return NULL;
     
-    // Contiguous access
-    nc_tensor* input_c = nc_tensor_contiguous(input);
-    nc_tensor* weight_c = nc_tensor_contiguous(weight);
-    nc_tensor* out_c = out; // Created contiguous
+    // Reshape weight to (C_out, C_in * kH * kW)
+    size_t K = C_in * kH * kW;
+    size_t w_flat_shape[] = {C_out, K};
+    nc_tensor* weight_flat = nc_tensor_reshape(weight, w_flat_shape, 2);
+    if (!weight_flat) { nc_tensor_free(out); return NULL; }
     
-    if (input->dtype == NC_F32) {
-        float* ip = nc_tensor_data_f32(input_c);
-        float* wp = nc_tensor_data_f32(weight_c);
-        float* op = nc_tensor_data_f32(out_c);
-        float* bp = bias ? nc_tensor_data_f32(bias) : NULL;
+    // Batched Im2Col
+    // We want a matrix of shape (K, N * H_out * W_out)
+    // But we allocate it as (K, N * P) where P = H_out * W_out
+    size_t P = H_out * W_out;
+    size_t col_shape[] = {K, N * P};
+    nc_tensor* col = nc_tensor_empty(col_shape, 2, input->dtype);
+    if (!col) {
+        nc_tensor_free(out);
+        nc_tensor_free(weight_flat);
+        return NULL;
+    }
+    
+    nc_tensor* input_c = nc_tensor_contiguous(input);
+    
+    // 1. Batched Im2Col
+    int i;
+    (void)i;
+    #ifdef NOCTA_OPENMP_ENABLED
+    #pragma omp parallel for
+    #endif
+    for (i = 0; i < (int)N; i++) {
+        if (input->dtype == NC_F32) {
+            float* input_data = nc_tensor_data_f32(input_c) + i * C_in * H * W;
+            float* col_data = nc_tensor_data_f32(col) + i * P; // Start at offset i*P for each K-row
+            // The stride between K-rows is N*P
+            im2col(input_data, (int)C_in, (int)H, (int)W, (int)kH, (int)kW, 
+                   (int)padding, (int)stride, col_data, (int)(N * P));
+        } else {
+            double* input_data = nc_tensor_data_f64(input_c) + i * C_in * H * W;
+            double* col_data = nc_tensor_data_f64(col) + i * P;
+            im2col_f64(input_data, (int)C_in, (int)H, (int)W, (int)kH, (int)kW, 
+                       (int)padding, (int)stride, col_data, (int)(N * P));
+        }
+    }
+    
+    // 2. GEMM: (C_out, K) @ (K, N*P) -> (C_out, N*P)
+    nc_tensor* out_gemm = nc_matmul(weight_flat, col);
+    nc_tensor_free(col);
+    nc_tensor_free(weight_flat);
+    if (input_c != input) nc_tensor_free(input_c);
+    
+    if (!out_gemm) { nc_tensor_free(out); return NULL; }
+    
+    // 3. Add bias and shuffle to (N, C_out, P)
+    // out_gemm is (C_out, N*P)
+    // We want out (N, C_out, P)
+    // out_gemm layout:
+    // Row c: [ img0_p..., img1_p..., ... ]
+    
+    if (out->dtype == NC_F32) {
+        float* src = nc_tensor_data_f32(out_gemm);
+        float* dst = nc_tensor_data_f32(out);
+        float* b_ptr = bias ? nc_tensor_data_f32(bias) : NULL;
         
-        // Manual collapse of N and C_out
-        size_t total_tasks = N * C_out;
-        
-        int t;
+        int n;
         #ifdef NOCTA_OPENMP_ENABLED
         #pragma omp parallel for
         #endif
-        for (t = 0; t < (int)total_tasks; t++) {
-            size_t c_out = t % C_out;
-            size_t b = t / C_out;
-            
-            float b_val = bp ? bp[c_out] : 0.0f;
-            
-            for (size_t h_out = 0; h_out < H_out; h_out++) {
-                for (size_t w_out = 0; w_out < W_out; w_out++) {
-                    double sum = 0.0;
-                    
-                    for (size_t c_in = 0; c_in < C_in; c_in++) {
-                        for (size_t kh = 0; kh < kH; kh++) {
-                            for (size_t kw = 0; kw < kW; kw++) {
-                                int h_in = (int)(h_out * stride + kh) - (int)padding;
-                                int w_in = (int)(w_out * stride + kw) - (int)padding;
-                                
-                                if (h_in >= 0 && h_in < (int)H && 
-                                    w_in >= 0 && w_in < (int)W) {
-                                    
-                                    float inp = ip[((b * C_in + c_in) * H + h_in) * W + w_in];
-                                    float w = wp[((c_out * C_in + c_in) * kH + kh) * kW + kw];
-                                    sum += inp * w;
-                                }
-                            }
-                        }
-                    }
-                    
-                    op[((b * C_out + c_out) * H_out + h_out) * W_out + w_out] = (float)sum + b_val;
+        for (n = 0; n < (int)N; n++) {
+            for (size_t c = 0; c < C_out; c++) {
+                float b_val = b_ptr ? b_ptr[c] : 0.0f;
+                
+                // Src: Row c, Block n (offset n*P)
+                float* s_ptr = src + c * (N * P) + n * P;
+                // Dst: Batch n, Channel c (offset n*C_out*P + c*P)
+                float* d_ptr = dst + n * (C_out * P) + c * P;
+                
+                for (size_t p = 0; p < P; p++) {
+                    d_ptr[p] = s_ptr[p] + b_val;
                 }
             }
         }
     } else {
-        double* ip = nc_tensor_data_f64(input_c);
-        double* wp = nc_tensor_data_f64(weight_c);
-        double* op = nc_tensor_data_f64(out_c);
-        double* bp = bias ? nc_tensor_data_f64(bias) : NULL;
+        double* src = nc_tensor_data_f64(out_gemm);
+        double* dst = nc_tensor_data_f64(out);
+        double* b_ptr = bias ? nc_tensor_data_f64(bias) : NULL;
         
-        size_t total_tasks = N * C_out;
-        
-        int t;
+        int n;
         #ifdef NOCTA_OPENMP_ENABLED
         #pragma omp parallel for
         #endif
-        for (t = 0; t < (int)total_tasks; t++) {
-            size_t c_out = t % C_out;
-            size_t b = t / C_out;
-            
-            double b_val = bp ? bp[c_out] : 0.0;
-            
-            for (size_t h_out = 0; h_out < H_out; h_out++) {
-                for (size_t w_out = 0; w_out < W_out; w_out++) {
-                    double sum = 0.0;
-                    
-                    for (size_t c_in = 0; c_in < C_in; c_in++) {
-                        for (size_t kh = 0; kh < kH; kh++) {
-                            for (size_t kw = 0; kw < kW; kw++) {
-                                int h_in = (int)(h_out * stride + kh) - (int)padding;
-                                int w_in = (int)(w_out * stride + kw) - (int)padding;
-                                
-                                if (h_in >= 0 && h_in < (int)H && 
-                                    w_in >= 0 && w_in < (int)W) {
-                                    
-                                    double inp = ip[((b * C_in + c_in) * H + h_in) * W + w_in];
-                                    double w = wp[((c_out * C_in + c_in) * kH + kh) * kW + kw];
-                                    sum += inp * w;
-                                }
-                            }
-                        }
-                    }
-                    
-                    op[((b * C_out + c_out) * H_out + h_out) * W_out + w_out] = sum + b_val;
+        for (n = 0; n < (int)N; n++) {
+            for (size_t c = 0; c < C_out; c++) {
+                double b_val = b_ptr ? b_ptr[c] : 0.0;
+                double* s_ptr = src + c * (N * P) + n * P;
+                double* d_ptr = dst + n * (C_out * P) + c * P;
+                for (size_t p = 0; p < P; p++) {
+                    d_ptr[p] = s_ptr[p] + b_val;
                 }
             }
         }
     }
     
-    if (input_c != input) nc_tensor_free(input_c);
-    if (weight_c != weight) nc_tensor_free(weight_c);
+    nc_tensor_free(out_gemm);
     
     // Setup autograd
     if (nc_grad_enabled() && (input->requires_grad || weight->requires_grad)) {
@@ -407,11 +485,6 @@ nc_tensor* nc_conv2d_forward(nc_tensor* input, nc_tensor* weight,
 // Conv2D Module
 // ============================================
 
-typedef struct {
-    size_t kernel_size;
-    size_t stride;
-} nc_maxpool_data;
-
 static nc_tensor* conv2d_module_forward(nc_module* self, nc_tensor* input) {
     nc_conv2d_data* data = self->extra;
     nc_tensor* weight = nc_module_get_param(self, "weight");
@@ -426,13 +499,6 @@ static void conv2d_print(nc_module* m) {
     printf("Conv2D(%zu, %zu, kernel_size=%zu, stride=%zu, padding=%zu, bias=%s)\n",
            data->in_channels, data->out_channels, data->kernel_size,
            data->stride, data->padding, data->has_bias ? "true" : "false");
-}
-
-// Custom print for MaxPool2D
-static void maxpool_print(nc_module* m) {
-    nc_maxpool_data* data = m->extra;
-    printf("MaxPool2D(kernel_size=%zu, stride=%zu)\n",
-           data->kernel_size, data->stride);
 }
 
 nc_module* nc_conv2d(size_t in_channels, size_t out_channels,
@@ -560,6 +626,11 @@ nc_tensor** nc_backward_maxpool2d(nc_tensor* grad, nc_tensor** saved, size_t n) 
 // MaxPool2D Forward
 // ============================================
 
+typedef struct {
+    size_t kernel_size;
+    size_t stride;
+} nc_maxpool_data;
+
 nc_tensor* nc_maxpool2d_forward(nc_tensor* input, size_t kernel_size, size_t stride) {
     if (!input || input->ndim != 4) return NULL;
     
@@ -627,6 +698,13 @@ nc_tensor* nc_maxpool2d_forward(nc_tensor* input, size_t kernel_size, size_t str
 static nc_tensor* maxpool_forward(nc_module* self, nc_tensor* input) {
     nc_maxpool_data* data = self->extra;
     return nc_maxpool2d_forward(input, data->kernel_size, data->stride);
+}
+
+// Custom print for MaxPool2D
+static void maxpool_print(nc_module* m) {
+    nc_maxpool_data* data = m->extra;
+    printf("MaxPool2D(kernel_size=%zu, stride=%zu)\n",
+           data->kernel_size, data->stride);
 }
 
 nc_module* nc_maxpool2d(size_t kernel_size, size_t stride) {
