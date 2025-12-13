@@ -73,39 +73,39 @@ static nc_tensor* matmul_2d(nc_tensor* a, nc_tensor* b) {
         return NULL;
     }
 
-    // Dispatch based on type
+    // Optimized implementation using raw pointers and IKJ loop order
     if (dtype == NC_F32) {
         float* ap = nc_tensor_data_f32(a_cont);
         float* bp = nc_tensor_data_f32(b_cont);
         float* cp = nc_tensor_data_f32(out);
         
         int i;
-        (void)i;
         #ifdef NOCTA_OPENMP_ENABLED
         #pragma omp parallel for
         #endif
         for (i = 0; i < (int)M; i++) {
-            for (int j = 0; j < (int)N; j++) {
-                double sum = 0.0;
-                for (size_t k = 0; k < K; k++) {
-                    sum += (double)ap[i * K + k] * (double)bp[k * N + j];
+            for (size_t k = 0; k < K; k++) {
+                float a_val = ap[i * K + k];
+                for (size_t j = 0; j < N; j++) {
+                    cp[i * N + j] += a_val * bp[k * N + j];
                 }
-                cp[i * N + j] = (float)sum;
             }
         }
     } else {
+        double* ap = nc_tensor_data_f64(a_cont);
+        double* bp = nc_tensor_data_f64(b_cont);
+        double* cp = nc_tensor_data_f64(out);
+        
         int i;
-        (void)i;
         #ifdef NOCTA_OPENMP_ENABLED
         #pragma omp parallel for
         #endif
         for (i = 0; i < (int)M; i++) {
-            for (int j = 0; j < (int)N; j++) {
-                double sum = 0.0;
-                for (size_t k = 0; k < K; k++) {
-                    sum += nc_tensor_get2(a_cont, i, k) * nc_tensor_get2(b_cont, k, j);
+            for (size_t k = 0; k < K; k++) {
+                double a_val = ap[i * K + k];
+                for (size_t j = 0; j < N; j++) {
+                    cp[i * N + j] += a_val * bp[k * N + j];
                 }
-                nc_tensor_set2(out, i, j, sum);
             }
         }
     }
@@ -139,7 +139,6 @@ static nc_tensor* matmul_mv(nc_tensor* mat, nc_tensor* vec) {
         float* op = nc_tensor_data_f32(out);
         
         int i;
-        (void)i;
         #ifdef NOCTA_OPENMP_ENABLED
         #pragma omp parallel for
         #endif
@@ -151,17 +150,20 @@ static nc_tensor* matmul_mv(nc_tensor* mat, nc_tensor* vec) {
             op[i] = (float)sum;
         }
     } else {
+        double* mp = nc_tensor_data_f64(m_cont);
+        double* vp = nc_tensor_data_f64(v_cont);
+        double* op = nc_tensor_data_f64(out);
+        
         int i;
-        (void)i;
         #ifdef NOCTA_OPENMP_ENABLED
         #pragma omp parallel for
         #endif
         for (i = 0; i < (int)M; i++) {
             double sum = 0.0;
             for (size_t k = 0; k < K; k++) {
-                sum += nc_tensor_get2(m_cont, i, k) * nc_tensor_get1(v_cont, k);
+                sum += mp[i * K + k] * vp[k];
             }
-            nc_tensor_set1(out, i, sum);
+            op[i] = sum;
         }
     }
 
@@ -194,7 +196,6 @@ static nc_tensor* matmul_vm(nc_tensor* vec, nc_tensor* mat) {
         float* op = nc_tensor_data_f32(out);
         
         int j;
-        (void)j;
         #ifdef NOCTA_OPENMP_ENABLED
         #pragma omp parallel for
         #endif
@@ -206,17 +207,20 @@ static nc_tensor* matmul_vm(nc_tensor* vec, nc_tensor* mat) {
             op[j] = (float)sum;
         }
     } else {
+        double* vp = nc_tensor_data_f64(v_cont);
+        double* mp = nc_tensor_data_f64(m_cont);
+        double* op = nc_tensor_data_f64(out);
+        
         int j;
-        (void)j;
         #ifdef NOCTA_OPENMP_ENABLED
         #pragma omp parallel for
         #endif
         for (j = 0; j < (int)N; j++) {
             double sum = 0.0;
             for (size_t k = 0; k < K; k++) {
-                sum += nc_tensor_get1(v_cont, k) * nc_tensor_get2(m_cont, k, j);
+                sum += vp[k] * mp[k * N + j];
             }
-            nc_tensor_set1(out, j, sum);
+            op[j] = sum;
         }
     }
 
