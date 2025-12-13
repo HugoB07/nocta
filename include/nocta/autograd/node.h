@@ -91,4 +91,7 @@ nc_tensor** nc_backward_batchnorm2d(nc_tensor* grad, nc_tensor** inputs, size_t 
 nc_tensor** nc_backward_batchnorm1d(nc_tensor* grad, nc_tensor** inputs, size_t n);
 nc_tensor** nc_backward_layernorm(nc_tensor* grad, nc_tensor** inputs, size_t n);
 
+// Dropout
+nc_tensor** nc_backward_dropout(nc_tensor* grad_output, nc_tensor** saved_tensors, size_t n_saved);
+
 #endif // NOCTA_NODE_H

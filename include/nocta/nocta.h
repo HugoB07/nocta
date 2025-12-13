@@ -2,7 +2,7 @@
 #define NOCTA_H
 
 // Nocta - A lightweight deep learning library in C
-// Version 0.3.0
+// Version 0.5.0
 
 // ============================================
 // Core
@@ -35,6 +35,7 @@
 #include "nocta/nn/linear.h"
 #include "nocta/nn/conv.h"
 #include "nocta/nn/batchnorm.h"
+#include "nocta/nn/dropout.h"
 
 // ============================================
 // Optimizers
@@ -47,9 +48,9 @@
 // Version info
 // ============================================
 #define NOCTA_VERSION_MAJOR 0
-#define NOCTA_VERSION_MINOR 4
+#define NOCTA_VERSION_MINOR 5
 #define NOCTA_VERSION_PATCH 0
-#define NOCTA_VERSION "0.4.0"
+#define NOCTA_VERSION "0.5.0"
 
 // ============================================
 // Global initialization / cleanup

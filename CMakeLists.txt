@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(nocta VERSION 0.4.0 LANGUAGES C)
+project(nocta VERSION 0.5.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -62,6 +62,7 @@ set(NOCTA_SOURCES
     src/nn/linear.c
     src/nn/conv.c
     src/nn/batchnorm.c
+    src/nn/dropout.c
     src/optim/optimizer.c
     src/optim/sgd.c
     src/optim/adam.c
@@ -98,4 +99,7 @@ if(NOCTA_BUILD_EXAMPLES)
 
     add_executable(benchmark examples/benchmark.c)
     target_link_libraries(benchmark PRIVATE nocta)
+
+    add_executable(dropout_test examples/dropout_test.c)
+    target_link_libraries(dropout_test PRIVATE nocta)
 endif()

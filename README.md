@@ -8,7 +8,7 @@ Nocta provides PyTorch-like functionality with automatic differentiation, tensor
 
 - **Tensors**: N-dimensional arrays with broadcasting, views, and type support (float32, float64, int32, int64)
 - **Automatic Differentiation**: Dynamic computation graph with backpropagation
-- **Neural Network Modules**: Linear layers, Convolutional layers (Conv2d, MaxPool2d), Normalization (BatchNorm1d, BatchNorm2d, LayerNorm), activations (ReLU, Sigmoid, Tanh, Softmax, GELU, etc.)
+- **Neural Network Modules**: Linear layers, Convolutional layers (Conv2d, MaxPool2d), Normalization (BatchNorm1d, BatchNorm2d, LayerNorm), Dropout, activations (ReLU, Sigmoid, Tanh, Softmax, GELU, etc.)
 - **Loss Functions**: CrossEntropy, MSE, BCE
 - **Optimizers**: SGD (with momentum, Nesterov), Adam, AdamW
 - **Serialization**: Save/load tensors, models, and training checkpoints in custom .ncta format
@@ -155,6 +155,7 @@ nc_module* nc_maxpool2d(kernel_size, stride);
 nc_module* nc_batchnorm1d(num_features);
 nc_module* nc_batchnorm2d(num_features);
 nc_module* nc_layernorm(normalized_shape, ndim);
+nc_module* nc_dropout(p);
 
 // Forward pass
 nc_tensor* output = nc_module_forward(module, input);
@@ -197,7 +198,7 @@ nocta/
 - [x] Batch normalization (BatchNorm1D, BatchNorm2D, LayerNorm)
 - [x] SIMD optimizations (AVX2/FMA)
 - [x] Multi-threading (OpenMP)
-- [ ] Dropout
+- [x] Dropout
 - [ ] GPU support (OpenCL/CUDA)
 
 ## License
