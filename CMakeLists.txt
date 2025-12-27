@@ -27,9 +27,6 @@ if(MSVC)
         add_compile_options(/arch:AVX2)
         add_compile_definitions(NOCTA_SIMD_ENABLED)
     endif()
-    if(NOCTA_ENABLE_OPENMP)
-        add_compile_options(/openmp)
-    endif()
 else()
     add_compile_options(-Wall -Wextra)
     if(CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -41,12 +38,9 @@ else()
         add_compile_options(-mavx2 -mfma)
         add_compile_definitions(NOCTA_SIMD_ENABLED)
     endif()
-    if(NOCTA_ENABLE_OPENMP)
-        add_compile_options(-fopenmp)
-    endif()
 endif()
 
-# Sources - only files we have created
+# Sources
 set(NOCTA_SOURCES
     src/core/tensor.c
     src/core/memory.c
@@ -81,6 +75,11 @@ target_include_directories(nocta
 # Math library (not needed on Windows)
 if(NOT WIN32)
     target_link_libraries(nocta PUBLIC m)
+endif()
+
+# Link OpenMP to the library
+if(NOCTA_ENABLE_OPENMP AND OpenMP_C_FOUND)
+    target_link_libraries(nocta PUBLIC OpenMP::OpenMP_C)
 endif()
 
 # Examples
