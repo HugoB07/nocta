@@ -15,6 +15,20 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+#ifdef NOCTA_CUDA_ENABLED
+#include "nocta/cuda/cuda_kernels.h"
+#endif
+
+// Helper to check if tensor is on CUDA
+static inline bool tensor_on_cuda(nc_tensor* t) {
+#ifdef NOCTA_CUDA_ENABLED
+    return t && t->storage && t->storage->device == NC_DEVICE_CUDA;
+#else
+    (void)t;
+    return false;
+#endif
+}
+
 // Explicit declaration to ensure correct prototype on 64-bit
 extern nc_tensor* nc_tensor_empty(const size_t* shape, size_t ndim, nc_dtype dtype);
 extern nc_tensor* nc_tensor_zeros(const size_t* shape, size_t ndim, nc_dtype dtype);
@@ -36,7 +50,7 @@ static nc_tensor** nc_backward_linear(nc_tensor* grad, nc_tensor** saved, size_t
     nc_tensor* input = saved[0];
     nc_tensor* weight = saved[1];
     nc_tensor* bias = saved[2];
-
+    
     // dL/dInput = grad @ weight
     if (input && input->requires_grad) {
         grads[0] = nc_matmul(grad, weight);
@@ -45,8 +59,11 @@ static nc_tensor** nc_backward_linear(nc_tensor* grad, nc_tensor** saved, size_t
     // dL/dWeight = grad^T @ input
     if (weight && weight->requires_grad) {
         nc_tensor* gt = nc_tensor_t(grad);
-        grads[1] = nc_matmul(gt, input);
-        nc_tensor_free(gt);
+        if (gt) {
+            grads[1] = nc_matmul(gt, input);
+            
+            nc_tensor_free(gt);
+        }
     }
 
     // dL/dBias = sum(grad, 0)

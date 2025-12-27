@@ -5,6 +5,9 @@
 #include <math.h>
 #include <time.h>
 #include <stdio.h>
+#ifdef NOCTA_CUDA_ENABLED
+#include "nocta/cuda/cuda_kernels.h"
+#endif
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -242,6 +245,21 @@ nc_tensor* nc_tensor_clone(const nc_tensor* t) {
     
     clone->requires_grad = t->requires_grad;
     
+#ifdef NOCTA_CUDA_ENABLED
+    // If source is on GPU, clone should also be on GPU
+    if (t->storage && t->storage->device == NC_DEVICE_CUDA && t->storage->cuda_data) {
+        nc_storage_to_device(clone->storage, NC_DEVICE_CUDA);
+        if (t->is_contiguous && clone->storage->cuda_data) {
+            // GPU to GPU copy
+            nc_cuda_copy_f32((float*)clone->storage->cuda_data, 
+                            (const float*)t->storage->cuda_data, 
+                            t->numel);
+            return clone;
+        }
+    }
+#endif
+    
+    // CPU path
     if (t->is_contiguous) {
         memcpy(clone->storage->data, nc_tensor_data(t), t->numel * nc_dtype_sizeof(t->dtype));
     } else {
@@ -611,6 +629,19 @@ nc_tensor* nc_tensor_to(const nc_tensor* t, nc_dtype dtype) {
 
 void nc_tensor_fill_(nc_tensor* t, double value) {
     if (!t) return;
+
+#ifdef NOCTA_CUDA_ENABLED
+    if (t->storage && t->storage->cuda_data && t->is_contiguous) {
+        if (t->dtype == NC_F32) {
+            nc_cuda_fill_f32((float*)t->storage->cuda_data, (float)value, t->numel);
+            return;
+        } else if (t->dtype == NC_F64) {
+            nc_cuda_fill_f64((double*)t->storage->cuda_data, value, t->numel);
+            return;
+        }
+    }
+#endif
+
     for (size_t i = 0; i < t->numel; i++) {
         nc_tensor_set_flat(t, i, value);
     }
@@ -620,6 +651,21 @@ nc_error nc_tensor_copy_(nc_tensor* dst, const nc_tensor* src) {
     if (!dst || !src) return NC_ERR_NULL_PTR;
     if (dst->numel != src->numel) return NC_ERR_SHAPE_MISMATCH;
     
+#ifdef NOCTA_CUDA_ENABLED
+    if (dst->storage && dst->storage->cuda_data && 
+        src->storage && src->storage->cuda_data &&
+        dst->is_contiguous && src->is_contiguous) {
+        
+        if (dst->dtype == NC_F32 && src->dtype == NC_F32) {
+            nc_cuda_copy_f32((float*)dst->storage->cuda_data, (const float*)src->storage->cuda_data, dst->numel);
+            return NC_OK;
+        } else if (dst->dtype == NC_F64 && src->dtype == NC_F64) {
+            nc_cuda_copy_f64((double*)dst->storage->cuda_data, (const double*)src->storage->cuda_data, dst->numel);
+            return NC_OK;
+        }
+    }
+#endif
+
     for (size_t i = 0; i < src->numel; i++) {
         nc_tensor_set_flat(dst, i, nc_tensor_get_flat(src, i));
     }
@@ -693,5 +739,19 @@ void nc_tensor_print_named(const nc_tensor* t, const char* name) {
             nc_tensor_get_flat(t, t->numel - 3),
             nc_tensor_get_flat(t, t->numel - 2),
             nc_tensor_get_flat(t, t->numel - 1));
+    }
+}
+
+// ============================================
+// Device Transfer
+// ============================================
+
+void nc_tensor_to_device(nc_tensor* t, nc_device_type device) {
+    if (!t || !t->storage) return;
+    nc_storage_to_device(t->storage, device);
+    
+    // Also move gradient if it exists
+    if (t->grad) {
+        nc_tensor_to_device(t->grad, device);
     }
 }

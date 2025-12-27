@@ -4,6 +4,10 @@
 #include <string.h>
 #include <stdio.h>
 
+#ifdef NOCTA_CUDA_ENABLED
+#include "nocta/cuda/cuda_kernels.h"
+#endif
+
 // Memory statistics
 static nc_mem_stats g_mem_stats = {0};
 
@@ -135,10 +139,14 @@ void nc_memory_report(void) {
 }
 
 // ============================================
-// Reference-counted storage
+// Device-aware Storage
 // ============================================
 
 nc_storage* nc_storage_create(size_t size) {
+    return nc_storage_create_on(size, nc_get_default_device());
+}
+
+nc_storage* nc_storage_create_on(size_t size, nc_device_type device) {
     if (size == 0) size = 1;
     
     nc_storage* s = (nc_storage*)nc_alloc(sizeof(nc_storage));
@@ -147,15 +155,39 @@ nc_storage* nc_storage_create(size_t size) {
         return NULL;
     }
     
-    s->data = nc_alloc(size);
-    if (!s->data) {
-        fprintf(stderr, "[nc_storage_create] Failed to alloc data of size %zu\n", size);
-        nc_free(s);
-        return NULL;
-    }
-    
+    s->data = NULL;
+    s->cuda_data = NULL;
     s->size = size;
+    s->device = device;
     nc_atomic_init(&s->refcount, 1);
+    
+    if (device == NC_DEVICE_CPU) {
+        s->data = nc_alloc(size);
+        if (!s->data) {
+            fprintf(stderr, "[nc_storage_create] Failed to alloc CPU data of size %zu\n", size);
+            nc_free(s);
+            return NULL;
+        }
+    }
+#ifdef NOCTA_CUDA_ENABLED
+    else if (device == NC_DEVICE_CUDA) {
+        s->cuda_data = nc_cuda_malloc(size);
+        if (!s->cuda_data) {
+            fprintf(stderr, "[nc_storage_create] Failed to alloc CUDA data of size %zu\n", size);
+            nc_free(s);
+            return NULL;
+        }
+    }
+#endif
+    else {
+        // Fallback to CPU
+        s->device = NC_DEVICE_CPU;
+        s->data = nc_alloc(size);
+        if (!s->data) {
+            nc_free(s);
+            return NULL;
+        }
+    }
     
     return s;
 }
@@ -172,11 +204,98 @@ void nc_storage_release(nc_storage* storage) {
     
     int new_count = nc_atomic_dec(&storage->refcount);
     if (new_count == 0) {
-        nc_free(storage->data);
+        if (storage->data) {
+            nc_free(storage->data);
+        }
+#ifdef NOCTA_CUDA_ENABLED
+        if (storage->cuda_data) {
+            nc_cuda_free(storage->cuda_data);
+        }
+#endif
         nc_free(storage);
     }
 }
 
 int nc_storage_refcount(const nc_storage* storage) {
     return storage ? nc_atomic_load(&storage->refcount) : 0;
+}
+
+// ============================================
+// Device Transfer
+// ============================================
+
+void nc_storage_to_device(nc_storage* s, nc_device_type target) {
+    if (!s || s->device == target) return;
+    
+#ifdef NOCTA_CUDA_ENABLED
+    if (target == NC_DEVICE_CUDA) {
+        // CPU -> CUDA
+        if (!s->cuda_data) {
+            s->cuda_data = nc_cuda_malloc(s->size);
+        }
+        if (s->data && s->cuda_data) {
+            nc_cuda_memcpy_h2d(s->cuda_data, s->data, s->size);
+        }
+        s->device = NC_DEVICE_CUDA;
+    } else if (target == NC_DEVICE_CPU) {
+        // CUDA -> CPU
+        if (!s->data) {
+            s->data = nc_alloc(s->size);
+        }
+        if (s->cuda_data && s->data) {
+            nc_cuda_memcpy_d2h(s->data, s->cuda_data, s->size);
+        }
+        s->device = NC_DEVICE_CPU;
+    }
+#else
+    (void)target;
+#endif
+}
+
+void nc_storage_ensure_on(nc_storage* s, nc_device_type target) {
+    if (!s) return;
+    
+#ifdef NOCTA_CUDA_ENABLED
+    if (target == NC_DEVICE_CUDA && !s->cuda_data) {
+        // Need to allocate and copy to CUDA
+        s->cuda_data = nc_cuda_malloc(s->size);
+        if (s->data && s->cuda_data) {
+            nc_cuda_memcpy_h2d(s->cuda_data, s->data, s->size);
+        }
+    } else if (target == NC_DEVICE_CPU && !s->data) {
+        // Need to allocate and copy to CPU
+        s->data = nc_alloc(s->size);
+        if (s->cuda_data && s->data) {
+            nc_cuda_memcpy_d2h(s->data, s->cuda_data, s->size);
+        }
+    }
+#else
+    (void)target;
+#endif
+}
+
+void* nc_storage_data_ptr(nc_storage* s) {
+    if (!s) return NULL;
+    
+#ifdef NOCTA_CUDA_ENABLED
+    if (s->device == NC_DEVICE_CUDA) {
+        return s->cuda_data;
+    }
+#endif
+    return s->data;
+}
+
+void nc_storage_sync_to_cpu(nc_storage* s) {
+#ifdef NOCTA_CUDA_ENABLED
+    if (s && s->device == NC_DEVICE_CUDA && s->cuda_data) {
+        if (!s->data) {
+            s->data = nc_alloc(s->size);
+        }
+        if (s->data) {
+            nc_cuda_memcpy_d2h(s->data, s->cuda_data, s->size);
+        }
+    }
+#else
+    (void)s;
+#endif
 }

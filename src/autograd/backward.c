@@ -114,13 +114,14 @@ static void accumulate_grad(nc_tensor* t, nc_tensor* grad) {
     if (!t->grad) {
         t->grad = nc_tensor_zeros(t->shape, t->ndim, t->dtype);
         if (!t->grad) return;
+#ifdef NOCTA_CUDA_ENABLED
+        if (t->storage->device == NC_DEVICE_CUDA) {
+            nc_storage_to_device(t->grad->storage, NC_DEVICE_CUDA);
+        }
+#endif
     }
     
-    for (size_t i = 0; i < t->numel; i++) {
-        double cur = nc_tensor_get_flat(t->grad, i);
-        double add = nc_tensor_get_flat(grad, i);
-        nc_tensor_set_flat(t->grad, i, cur + add);
-    }
+    nc_add_(t->grad, grad);
 }
 
 nc_error nc_backward(nc_tensor* t, nc_tensor* grad_output) {
@@ -141,6 +142,11 @@ nc_error nc_backward(nc_tensor* t, nc_tensor* grad_output) {
             return NC_ERR_SHAPE_MISMATCH;
         }
         out_grad = nc_tensor_ones(t->shape, t->ndim, t->dtype);
+#ifdef NOCTA_CUDA_ENABLED
+        if (out_grad && t->storage->device == NC_DEVICE_CUDA) {
+            nc_storage_to_device(out_grad->storage, NC_DEVICE_CUDA);
+        }
+#endif
         free_out_grad = 1;
     }
 
@@ -194,7 +200,7 @@ nc_error nc_backward(nc_tensor* t, nc_tensor* grad_output) {
             continue;
         }
         
-        // Distribute gradients to inputs
+            // Distribute gradients to inputs
         for (size_t j = 0; j < node->n_inputs; j++) {
             nc_tensor* inp = node->inputs[j];
             nc_tensor* inp_grad = input_grads[j];
@@ -209,11 +215,7 @@ nc_error nc_backward(nc_tensor* t, nc_tensor* grad_output) {
                             node_grads[k] = nc_tensor_clone(inp_grad);
                         } else {
                             // Accumulate
-                            for (size_t m = 0; m < inp_grad->numel && m < node_grads[k]->numel; m++) {
-                                double cur = nc_tensor_get_flat(node_grads[k], m);
-                                double add = nc_tensor_get_flat(inp_grad, m);
-                                nc_tensor_set_flat(node_grads[k], m, cur + add);
-                            }
+                            nc_add_(node_grads[k], inp_grad);
                         }
                         break;
                     }

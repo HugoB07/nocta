@@ -12,6 +12,20 @@
 #include <omp.h>
 #endif
 
+#ifdef NOCTA_CUDA_ENABLED
+#include "nocta/cuda/cuda_kernels.h"
+#endif
+
+// Helper to check if tensor is on CUDA
+static inline bool tensor_on_cuda(nc_tensor* t) {
+#ifdef NOCTA_CUDA_ENABLED
+    return t && t->storage && t->storage->device == NC_DEVICE_CUDA;
+#else
+    (void)t;
+    return false;
+#endif
+}
+
 // ============================================
 // Conv2D Extra Data
 // ============================================
@@ -135,6 +149,48 @@ nc_tensor** nc_backward_conv2d(nc_tensor* grad, nc_tensor** saved, size_t n) {
     // Gradient w.r.t bias (if present)
     if (bias) {
         grads[2] = nc_tensor_zeros(bias->shape, bias->ndim, bias->dtype);
+    }
+    
+    // CUDA Dispatch
+#ifdef NOCTA_CUDA_ENABLED
+    if (grad->storage && grad->storage->device == NC_DEVICE_CUDA) {
+        // Prepare gradients on GPU
+        nc_tensor_to_device(grads[0], NC_DEVICE_CUDA);
+        nc_tensor_to_device(grads[1], NC_DEVICE_CUDA);
+        if (grads[2]) nc_tensor_to_device(grads[2], NC_DEVICE_CUDA);
+        
+        // 1. dL/dX
+        if (input->storage && input->storage->cuda_data && grads[0]->storage->cuda_data) {
+            nc_cuda_conv2d_backward_input_f32(
+                (float*)grads[0]->storage->cuda_data,
+                (const float*)grad->storage->cuda_data,
+                (const float*)weight->storage->cuda_data,
+                N, C_in, H, W, C_out, kH, kW, stride, padding);
+        }
+        
+        // 2. dL/dW
+        if (grads[1]->storage->cuda_data) {
+            nc_cuda_conv2d_backward_weight_f32(
+                (float*)grads[1]->storage->cuda_data,
+                (const float*)grad->storage->cuda_data,
+                (const float*)input->storage->cuda_data,
+                N, C_in, H, W, C_out, kH, kW, stride, padding);
+        }
+            
+        // 3. dL/db
+        if (grads[2] && grads[2]->storage->cuda_data) {
+            nc_cuda_conv2d_backward_bias_f32(
+                (float*)grads[2]->storage->cuda_data,
+                (const float*)grad->storage->cuda_data,
+                N, C_out, H_out, W_out);
+        }
+        
+        return grads;
+    }
+#endif
+    
+    if (bias) {
+        // CPU Bias Backward
         // dL/db = sum over (N, H_out, W_out) of grad
         // Parallelize over channels
         int c;
@@ -347,6 +403,54 @@ nc_tensor* nc_conv2d_forward(nc_tensor* input, nc_tensor* weight,
     size_t H_out = nc_conv_output_size(H, kH, stride, padding);
     size_t W_out = nc_conv_output_size(W, kW, stride, padding);
     
+#ifdef NOCTA_CUDA_ENABLED
+    // CUDA path for F32 tensors on GPU
+    if (tensor_on_cuda(input) && tensor_on_cuda(weight) && 
+        input->dtype == NC_F32 && nc_tensor_is_contiguous(input) && nc_tensor_is_contiguous(weight)) {
+        
+        size_t out_shape[] = {N, C_out, H_out, W_out};
+        nc_tensor* out = nc_tensor_zeros(out_shape, 4, NC_F32);
+        if (!out) return NULL;
+        nc_storage_to_device(out->storage, NC_DEVICE_CUDA);
+        
+        const float* bias_ptr = (bias && tensor_on_cuda(bias)) ? 
+            (const float*)bias->storage->cuda_data : NULL;
+        
+        nc_cuda_conv2d_forward_f32(
+            (float*)out->storage->cuda_data,
+            (const float*)input->storage->cuda_data,
+            (const float*)weight->storage->cuda_data,
+            bias_ptr,
+            (int)N, (int)C_in, (int)H, (int)W,
+            (int)C_out, (int)kH, (int)kW,
+            (int)stride, (int)padding);
+        
+        // Setup autograd
+        if (nc_grad_enabled() && (input->requires_grad || weight->requires_grad || 
+            (bias && bias->requires_grad))) {
+            out->requires_grad = true;
+            out->is_leaf = false;
+            nc_node* node = nc_node_create("conv2d", nc_backward_conv2d);
+            if (node) {
+                nc_node_add_input(node, input);
+                nc_node_add_input(node, weight);
+                if (bias) nc_node_add_input(node, bias);
+                nc_node_save_tensor(node, input);
+                nc_node_save_tensor(node, weight);
+                nc_node_save_tensor(node, bias);
+                nc_tensor* stride_t = nc_tensor_scalar((double)stride, NC_F64);
+                nc_tensor* padding_t = nc_tensor_scalar((double)padding, NC_F64);
+                nc_node_save_owned_tensor(node, stride_t);
+                nc_node_save_owned_tensor(node, padding_t);
+                node->output = out;
+                out->grad_fn = node;
+            }
+        }
+        return out;
+    }
+#endif
+    
+    // CPU path (im2col + GEMM)
     size_t out_shape[] = {N, C_out, H_out, W_out};
     nc_tensor* out = nc_tensor_zeros(out_shape, 4, input->dtype);
     if (!out) return NULL;
@@ -584,6 +688,24 @@ nc_tensor** nc_backward_maxpool2d(nc_tensor* grad, nc_tensor** saved, size_t n) 
     
     grads[0] = nc_tensor_zeros(input->shape, input->ndim, input->dtype);
     
+#ifdef NOCTA_CUDA_ENABLED
+    if (grad->storage && grad->storage->device == NC_DEVICE_CUDA &&
+        input->storage && input->storage->device == NC_DEVICE_CUDA) {
+        
+        nc_tensor_to_device(grads[0], NC_DEVICE_CUDA);
+        
+        if (grads[0]->storage->cuda_data) {
+            nc_cuda_maxpool2d_backward_f32(
+                (float*)grads[0]->storage->cuda_data,
+                (const float*)grad->storage->cuda_data,
+                (const float*)input->storage->cuda_data,
+                NULL, // output unused
+                N, C, H, W, kernel_size, kernel_size, stride);
+            return grads;
+        }
+    }
+#endif
+    
     int b;
     (void)b;
     #ifdef NOCTA_OPENMP_ENABLED
@@ -646,6 +768,37 @@ nc_tensor* nc_maxpool2d_forward(nc_tensor* input, size_t kernel_size, size_t str
     nc_tensor* out = nc_tensor_empty(out_shape, 4, input->dtype);
     if (!out) return NULL;
     
+#ifdef NOCTA_CUDA_ENABLED
+    if (tensor_on_cuda(input)) {
+        nc_tensor_to_device(out, NC_DEVICE_CUDA);
+        if (out->storage->cuda_data) {
+             nc_cuda_maxpool2d_forward_f32(
+                (float*)out->storage->cuda_data,
+                (const float*)input->storage->cuda_data,
+                (int)N, (int)C, (int)H, (int)W, 
+                (int)kernel_size, (int)kernel_size, (int)stride);
+             
+             // Setup autograd (same as CPU)
+             if (nc_grad_enabled() && input->requires_grad) {
+                out->requires_grad = true;
+                out->is_leaf = false;
+                nc_node* node = nc_node_create("maxpool2d", nc_backward_maxpool2d);
+                if (node) {
+                    nc_node_add_input(node, input);
+                    nc_node_save_tensor(node, input);
+                    nc_tensor* ks_t = nc_tensor_scalar((double)kernel_size, NC_F32);
+                    nc_tensor* st_t = nc_tensor_scalar((double)stride, NC_F32);
+                    nc_node_save_owned_tensor(node, ks_t);
+                    nc_node_save_owned_tensor(node, st_t);
+                    node->output = out;
+                    out->grad_fn = node;
+                }
+             }
+             return out;
+        }
+    }
+#endif
+
     int b;
     (void)b;
     #ifdef NOCTA_OPENMP_ENABLED

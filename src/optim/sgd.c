@@ -1,5 +1,9 @@
 #include "nocta/optim/sgd.h"
 #include <string.h>
+#include "nocta/core/device.h"
+#ifdef NOCTA_CUDA_ENABLED
+#include "nocta/cuda/cuda_kernels.h"
+#endif
 
 typedef struct {
     nc_sgd_config config;
@@ -32,8 +36,35 @@ static void sgd_step(nc_optimizer* self) {
             // Initialize velocity buffer if needed
             if (!v) {
                 v = nc_tensor_zeros(param->shape, param->ndim, param->dtype);
+#ifdef NOCTA_CUDA_ENABLED
+                if (param->storage->device == NC_DEVICE_CUDA) {
+                    nc_tensor_to_device(v, NC_DEVICE_CUDA);
+                }
+#endif
                 state->velocity[i] = v;
             }
+            
+#ifdef NOCTA_CUDA_ENABLED
+            if (param->storage->device == NC_DEVICE_CUDA && param->dtype == NC_F32) {
+                // Ensure velocity is on CUDA
+                if (v->storage->device != NC_DEVICE_CUDA) {
+                    nc_tensor_to_device(v, NC_DEVICE_CUDA);
+                }
+                 
+                nc_cuda_sgd_momentum_f32(
+                    (float*)param->storage->cuda_data,
+                    (float*)v->storage->cuda_data,
+                    (const float*)grad->storage->cuda_data,
+                    (float)self->lr,
+                    (float)cfg->momentum,
+                    (float)cfg->dampening,
+                    (int)cfg->nesterov,
+                    param->numel
+                );
+            
+                continue;
+            }
+#endif
             
             for (size_t j = 0; j < param->numel; j++) {
                 double g = nc_tensor_get_flat(grad, j);
@@ -61,6 +92,17 @@ static void sgd_step(nc_optimizer* self) {
             }
         } else {
             // Simple SGD without momentum
+#ifdef NOCTA_CUDA_ENABLED
+            if (param->storage->device == NC_DEVICE_CUDA && param->dtype == NC_F32) {
+                nc_cuda_sgd_step_f32(
+                    (float*)param->storage->cuda_data,
+                    (const float*)grad->storage->cuda_data,
+                    (float)self->lr,
+                    param->numel
+                );
+                continue;
+            }
+#endif
             for (size_t j = 0; j < param->numel; j++) {
                 double p = nc_tensor_get_flat(param, j);
                 double g = nc_tensor_get_flat(grad, j);

@@ -8,9 +8,23 @@
 #include <omp.h>
 #endif
 
+#ifdef NOCTA_CUDA_ENABLED
+#include "nocta/cuda/cuda_kernels.h"
+#endif
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// Helper to check if tensor is on CUDA
+static inline bool tensor_on_cuda(nc_tensor* t) {
+#ifdef NOCTA_CUDA_ENABLED
+    return t && t->storage && t->storage->device == NC_DEVICE_CUDA;
+#else
+    (void)t;
+    return false;
+#endif
+}
 
 // ============================================
 // Backward functions
@@ -24,6 +38,21 @@ nc_tensor** nc_backward_relu(nc_tensor* grad, nc_tensor** inputs, size_t n) {
     nc_tensor* x = inputs[0];
     grads[0] = nc_tensor_empty(x->shape, x->ndim, x->dtype);
     if (!grads[0]) { free(grads); return NULL; }
+    
+#ifdef NOCTA_CUDA_ENABLED
+    if (tensor_on_cuda(grad) && tensor_on_cuda(x)) {
+        nc_storage_to_device(grads[0]->storage, NC_DEVICE_CUDA);
+        if (grads[0]->storage->cuda_data) {
+            nc_cuda_relu_backward_f32(
+                (float*)grads[0]->storage->cuda_data,
+                (const float*)grad->storage->cuda_data,
+                (const float*)x->storage->cuda_data,
+                x->numel
+            );
+            return grads;
+        }
+    }
+#endif
     
     // d(relu)/dx = 1 if x > 0, else 0
     int i;
@@ -169,6 +198,18 @@ nc_tensor* nc_relu(nc_tensor* x) {
     nc_tensor* out = nc_tensor_empty(x->shape, x->ndim, x->dtype);
     if (!out) return NULL;
     
+#ifdef NOCTA_CUDA_ENABLED
+    if (tensor_on_cuda(x) && x->dtype == NC_F32 && nc_tensor_is_contiguous(x)) {
+        nc_storage_to_device(out->storage, NC_DEVICE_CUDA);
+        nc_cuda_relu_f32((float*)out->storage->cuda_data,
+                         (const float*)x->storage->cuda_data,
+                         out->numel);
+        setup_grad(out, x, "relu", nc_backward_relu, NULL);
+        return out;
+    }
+#endif
+    
+    // CPU path
     int i;
     (void)i;
     #ifdef NOCTA_OPENMP_ENABLED
@@ -274,6 +315,17 @@ nc_tensor* nc_sigmoid(nc_tensor* x) {
     nc_tensor* out = nc_tensor_empty(x->shape, x->ndim, x->dtype);
     if (!out) return NULL;
     
+#ifdef NOCTA_CUDA_ENABLED
+    if (tensor_on_cuda(x) && x->dtype == NC_F32 && nc_tensor_is_contiguous(x)) {
+        nc_storage_to_device(out->storage, NC_DEVICE_CUDA);
+        nc_cuda_sigmoid_f32((float*)out->storage->cuda_data,
+                            (const float*)x->storage->cuda_data,
+                            out->numel);
+        setup_grad(out, x, "sigmoid", nc_backward_sigmoid, out);
+        return out;
+    }
+#endif
+    
     int i;
     (void)i;
     #ifdef NOCTA_OPENMP_ENABLED
@@ -284,7 +336,6 @@ nc_tensor* nc_sigmoid(nc_tensor* x) {
         nc_tensor_set_flat(out, i, 1.0 / (1.0 + exp(-v)));
     }
     
-    // Save output for backward (sigmoid derivative uses output)
     setup_grad(out, x, "sigmoid", nc_backward_sigmoid, out);
     return out;
 }
@@ -294,6 +345,17 @@ nc_tensor* nc_tanh_act(nc_tensor* x) {
     
     nc_tensor* out = nc_tensor_empty(x->shape, x->ndim, x->dtype);
     if (!out) return NULL;
+    
+#ifdef NOCTA_CUDA_ENABLED
+    if (tensor_on_cuda(x) && x->dtype == NC_F32 && nc_tensor_is_contiguous(x)) {
+        nc_storage_to_device(out->storage, NC_DEVICE_CUDA);
+        nc_cuda_tanh_f32((float*)out->storage->cuda_data,
+                         (const float*)x->storage->cuda_data,
+                         out->numel);
+        setup_grad(out, x, "tanh", nc_backward_tanh, NULL);
+        return out;
+    }
+#endif
     
     int i;
     (void)i;
@@ -320,6 +382,19 @@ nc_tensor* nc_softmax(nc_tensor* x, int dim) {
     nc_tensor* out = nc_tensor_empty(x->shape, x->ndim, x->dtype);
     if (!out) return NULL;
     
+#ifdef NOCTA_CUDA_ENABLED
+    // Fast path: 2D tensor, softmax on last dim, contiguous
+    if (tensor_on_cuda(x) && x->dtype == NC_F32 && nc_tensor_is_contiguous(x) &&
+        x->ndim == 2 && (size_t)dim == x->ndim - 1) {
+        nc_storage_to_device(out->storage, NC_DEVICE_CUDA);
+        nc_cuda_softmax_f32((float*)out->storage->cuda_data,
+                            (const float*)x->storage->cuda_data,
+                            x->shape[0], x->shape[1]);
+        setup_grad(out, x, "softmax", nc_backward_softmax, out);
+        return out;
+    }
+#endif
+    
     size_t dim_size = x->shape[dim];
     size_t outer_size = 1, inner_size = 1;
     
@@ -333,7 +408,6 @@ nc_tensor* nc_softmax(nc_tensor* x, int dim) {
     #endif
     for (o = 0; o < (int)outer_size; o++) {
         for (size_t in = 0; in < inner_size; in++) {
-            // Find max for numerical stability
             double max_val = -INFINITY;
             for (size_t d = 0; d < dim_size; d++) {
                 size_t idx = (o * dim_size + d) * inner_size + in;
@@ -341,7 +415,6 @@ nc_tensor* nc_softmax(nc_tensor* x, int dim) {
                 if (v > max_val) max_val = v;
             }
             
-            // Compute exp and sum
             double sum = 0.0;
             for (size_t d = 0; d < dim_size; d++) {
                 size_t idx = (o * dim_size + d) * inner_size + in;
@@ -350,7 +423,6 @@ nc_tensor* nc_softmax(nc_tensor* x, int dim) {
                 sum += v;
             }
             
-            // Normalize
             for (size_t d = 0; d < dim_size; d++) {
                 size_t idx = (o * dim_size + d) * inner_size + in;
                 nc_tensor_set_flat(out, idx, nc_tensor_get_flat(out, idx) / sum);

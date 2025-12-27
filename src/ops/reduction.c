@@ -8,6 +8,20 @@
 #include <omp.h>
 #endif
 
+#ifdef NOCTA_CUDA_ENABLED
+#include "nocta/cuda/cuda_kernels.h"
+#endif
+
+// Helper to check if tensor is on CUDA
+static inline bool tensor_on_cuda(nc_tensor* t) {
+#ifdef NOCTA_CUDA_ENABLED
+    return t && t->storage && t->storage->device == NC_DEVICE_CUDA;
+#else
+    (void)t;
+    return false;
+#endif
+}
+
 // ============================================
 // Backward functions
 // ============================================
@@ -94,6 +108,26 @@ nc_tensor* nc_sum_all(nc_tensor* x) {
     NC_CHECK_NULL(x);
     
     double sum = 0.0;
+    
+#ifdef NOCTA_CUDA_ENABLED
+    if (tensor_on_cuda(x) && x->dtype == NC_F32 && nc_tensor_is_contiguous(x)) {
+        sum = (double)nc_cuda_sum_f32((const float*)x->storage->cuda_data, x->numel);
+        nc_tensor* out = nc_tensor_scalar(sum, x->dtype);
+        if (out && nc_grad_enabled() && x->requires_grad) {
+            out->requires_grad = true;
+            out->is_leaf = false;
+            nc_node* node = nc_node_create("sum", nc_backward_sum);
+            if (node) {
+                nc_node_add_input(node, x);
+                nc_node_save_tensor(node, x);
+                node->output = out;
+                out->grad_fn = node;
+            }
+        }
+        return out;
+    }
+#endif
+    
     int i;
     (void)i;
     #ifdef NOCTA_OPENMP_ENABLED
@@ -105,7 +139,6 @@ nc_tensor* nc_sum_all(nc_tensor* x) {
     
     nc_tensor* out = nc_tensor_scalar(sum, x->dtype);
     
-    // Autograd
     if (out && nc_grad_enabled() && x->requires_grad) {
         out->requires_grad = true;
         out->is_leaf = false;
@@ -292,6 +325,13 @@ nc_tensor* nc_std(nc_tensor* x, int axis, bool keepdim, bool unbiased) {
 
 nc_tensor* nc_max_all(nc_tensor* x) {
     NC_CHECK_NULL(x);
+    
+#ifdef NOCTA_CUDA_ENABLED
+    if (tensor_on_cuda(x) && x->dtype == NC_F32 && nc_tensor_is_contiguous(x)) {
+        float max_val = nc_cuda_max_f32((const float*)x->storage->cuda_data, x->numel);
+        return nc_tensor_scalar((double)max_val, x->dtype);
+    }
+#endif
     
     double max_val = -DBL_MAX;
     int i;
@@ -524,7 +564,6 @@ nc_tensor* nc_norm(nc_tensor* x, double p) {
     double sum = 0.0;
     
     if (p == 2.0) {
-        // L2 norm (Euclidean)
         int i;
         (void)i;
         #ifdef NOCTA_OPENMP_ENABLED
@@ -536,7 +575,6 @@ nc_tensor* nc_norm(nc_tensor* x, double p) {
         }
         return nc_tensor_scalar(sqrt(sum), x->dtype);
     } else if (p == 1.0) {
-        // L1 norm
         int i;
         (void)i;
         #ifdef NOCTA_OPENMP_ENABLED
@@ -547,7 +585,6 @@ nc_tensor* nc_norm(nc_tensor* x, double p) {
         }
         return nc_tensor_scalar(sum, x->dtype);
     } else if (p == INFINITY) {
-        // L-inf norm
         double max_val = 0.0;
         int i;
         (void)i;
@@ -573,7 +610,6 @@ nc_tensor* nc_norm(nc_tensor* x, double p) {
         #endif
         return nc_tensor_scalar(max_val, x->dtype);
     } else {
-        // General L-p norm
         int i;
         (void)i;
         #ifdef NOCTA_OPENMP_ENABLED

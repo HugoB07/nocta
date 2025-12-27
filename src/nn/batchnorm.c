@@ -9,6 +9,20 @@
 #include <omp.h>
 #endif
 
+#ifdef NOCTA_CUDA_ENABLED
+#include "nocta/cuda/cuda_kernels.h"
+#endif
+
+// Helper to check if tensor is on CUDA
+static inline bool tensor_on_cuda(nc_tensor* t) {
+#ifdef NOCTA_CUDA_ENABLED
+    return t && t->storage && t->storage->device == NC_DEVICE_CUDA;
+#else
+    (void)t;
+    return false;
+#endif
+}
+
 // ============================================
 // BatchNorm2D Extra Data
 // ============================================
@@ -46,6 +60,39 @@ nc_tensor** nc_backward_batchnorm2d(nc_tensor* grad, nc_tensor** saved, size_t n
     size_t spatial = H * W;
     size_t M = N * spatial;  // Total elements per channel
     
+#ifdef NOCTA_CUDA_ENABLED
+    if (grad->storage->device == NC_DEVICE_CUDA && 
+        input->storage->device == NC_DEVICE_CUDA) {
+        
+        // Prepare gradients
+        grads[0] = nc_tensor_zeros(input->shape, input->ndim, input->dtype);
+        nc_tensor_to_device(grads[0], NC_DEVICE_CUDA);
+        
+        if (weight) {
+            grads[1] = nc_tensor_zeros(weight->shape, weight->ndim, weight->dtype);
+            nc_tensor_to_device(grads[1], NC_DEVICE_CUDA);
+        }
+        
+        size_t b_shape[] = {C};
+        grads[2] = nc_tensor_zeros(b_shape, 1, input->dtype);
+        nc_tensor_to_device(grads[2], NC_DEVICE_CUDA);
+        
+        nc_cuda_batchnorm_backward_f32(
+            (float*)grads[0]->storage->cuda_data,
+            grads[1] ? (float*)grads[1]->storage->cuda_data : NULL,
+            (float*)grads[2]->storage->cuda_data,
+            (const float*)grad->storage->cuda_data,
+            (const float*)input->storage->cuda_data,
+            weight ? (const float*)weight->storage->cuda_data : NULL, // gamma
+            (const float*)mean->storage->cuda_data,
+            (const float*)var->storage->cuda_data,
+            (int)N, (int)C, (int)spatial,
+            (float)eps
+        );
+        return grads;
+    }
+#endif
+
     // Gradient w.r.t input
     grads[0] = nc_tensor_zeros(input->shape, input->ndim, input->dtype);
     
@@ -143,6 +190,73 @@ nc_tensor* nc_batchnorm2d_forward_fn(
     size_t spatial = H * W;
     size_t M = N * spatial;
     
+#ifdef NOCTA_CUDA_ENABLED
+    // CUDA path for F32 tensors on GPU
+    if (tensor_on_cuda(input) && input->dtype == NC_F32 && nc_tensor_is_contiguous(input)) {
+        nc_tensor* out = nc_tensor_empty(input->shape, input->ndim, input->dtype);
+        if (!out) return NULL;
+        nc_storage_to_device(out->storage, NC_DEVICE_CUDA);
+        
+        size_t c_shape[] = {C};
+        nc_tensor* batch_mean = nc_tensor_zeros(c_shape, 1, NC_F32);
+        nc_tensor* batch_var = nc_tensor_zeros(c_shape, 1, NC_F32);
+        if (!batch_mean || !batch_var) {
+            nc_tensor_free(out);
+            nc_tensor_free(batch_mean);
+            nc_tensor_free(batch_var);
+            return NULL;
+        }
+        nc_storage_to_device(batch_mean->storage, NC_DEVICE_CUDA);
+        nc_storage_to_device(batch_var->storage, NC_DEVICE_CUDA);
+        
+        const float* gamma_ptr = (weight && tensor_on_cuda(weight)) ? 
+            (const float*)weight->storage->cuda_data : NULL;
+        const float* beta_ptr = (bias && tensor_on_cuda(bias)) ? 
+            (const float*)bias->storage->cuda_data : NULL;
+        float* rm_ptr = (running_mean && tensor_on_cuda(running_mean)) ?
+            (float*)running_mean->storage->cuda_data : NULL;
+        float* rv_ptr = (running_var && tensor_on_cuda(running_var)) ?
+            (float*)running_var->storage->cuda_data : NULL;
+        
+        nc_cuda_batchnorm_forward_f32(
+            (float*)out->storage->cuda_data,
+            (const float*)input->storage->cuda_data,
+            gamma_ptr, beta_ptr,
+            rm_ptr, rv_ptr,
+            (float*)batch_mean->storage->cuda_data,
+            (float*)batch_var->storage->cuda_data,
+            (int)N, (int)C, (int)spatial,
+            (float)momentum, (float)eps,
+            training);
+        
+        // Setup autograd
+        if (nc_grad_enabled() && (input->requires_grad || 
+            (weight && weight->requires_grad) || (bias && bias->requires_grad))) {
+            out->requires_grad = true;
+            out->is_leaf = false;
+            nc_node* node = nc_node_create("batchnorm2d", nc_backward_batchnorm2d);
+            if (node) {
+                nc_node_add_input(node, input);
+                if (weight) nc_node_add_input(node, weight);
+                if (bias) nc_node_add_input(node, bias);
+                nc_node_save_tensor(node, input);
+                nc_node_save_tensor(node, weight);
+                nc_node_save_owned_tensor(node, batch_mean);
+                nc_node_save_owned_tensor(node, batch_var);
+                nc_tensor* eps_t = nc_tensor_scalar(eps, NC_F64);
+                nc_node_save_owned_tensor(node, eps_t);
+                node->output = out;
+                out->grad_fn = node;
+            }
+        } else {
+            nc_tensor_free(batch_mean);
+            nc_tensor_free(batch_var);
+        }
+        return out;
+    }
+#endif
+    
+    // CPU path
     nc_tensor* out = nc_tensor_empty(input->shape, input->ndim, input->dtype);
     if (!out) return NULL;
     
@@ -192,12 +306,9 @@ nc_tensor* nc_batchnorm2d_forward_fn(
             
             // Update running statistics
             if (running_mean && running_var) {
-                // Note: running stats update is not thread-safe if multiple threads update the same index.
-                // But here each thread works on a different 'c', so it is safe.
                 double rm = nc_tensor_get1(running_mean, c);
                 double rv = nc_tensor_get1(running_var, c);
                 nc_tensor_set1(running_mean, c, (1.0 - momentum) * rm + momentum * mean_val);
-                // Use unbiased variance for running stats
                 double unbiased_var = (M > 1) ? var_sum / (double)(M - 1) : var_val;
                 nc_tensor_set1(running_var, c, (1.0 - momentum) * rv + momentum * unbiased_var);
             }
@@ -382,6 +493,37 @@ nc_tensor** nc_backward_batchnorm1d(nc_tensor* grad, nc_tensor** saved, size_t n
     size_t M = N * L;
     
     grads[0] = nc_tensor_zeros(input->shape, input->ndim, input->dtype);
+    
+#ifdef NOCTA_CUDA_ENABLED
+    if (grad->storage->device == NC_DEVICE_CUDA && 
+        input->storage->device == NC_DEVICE_CUDA) {
+        
+        nc_tensor_to_device(grads[0], NC_DEVICE_CUDA);
+        
+        if (weight) {
+            grads[1] = nc_tensor_zeros(weight->shape, weight->ndim, weight->dtype);
+            nc_tensor_to_device(grads[1], NC_DEVICE_CUDA);
+        }
+        
+        size_t b_shape[] = {C};
+        grads[2] = nc_tensor_zeros(b_shape, 1, input->dtype);
+        nc_tensor_to_device(grads[2], NC_DEVICE_CUDA);
+        
+        nc_cuda_batchnorm_backward_f32(
+            (float*)grads[0]->storage->cuda_data,
+            grads[1] ? (float*)grads[1]->storage->cuda_data : NULL,
+            (float*)grads[2]->storage->cuda_data,
+            (const float*)grad->storage->cuda_data,
+            (const float*)input->storage->cuda_data,
+            weight ? (const float*)weight->storage->cuda_data : NULL,
+            (const float*)mean->storage->cuda_data,
+            (const float*)var->storage->cuda_data,
+            (int)N, (int)C, (int)L,
+            (float)eps
+        );
+        return grads;
+    }
+#endif
     
     if (weight) {
         grads[1] = nc_tensor_zeros(weight->shape, weight->ndim, weight->dtype);
@@ -586,6 +728,72 @@ nc_tensor* nc_batchnorm1d_forward_fn(
     nc_tensor* out = nc_tensor_empty(input->shape, input->ndim, input->dtype);
     if (!out) return NULL;
     
+#ifdef NOCTA_CUDA_ENABLED
+    if (tensor_on_cuda(input) && input->dtype == NC_F32) {
+        nc_storage_to_device(out->storage, NC_DEVICE_CUDA);
+        
+        size_t c_shape[] = {C};
+        nc_tensor* batch_mean = nc_tensor_zeros(c_shape, 1, NC_F32);
+        nc_tensor* batch_var = nc_tensor_zeros(c_shape, 1, NC_F32);
+        if (!batch_mean || !batch_var) {
+            nc_tensor_free(out);
+            nc_tensor_free(batch_mean);
+            nc_tensor_free(batch_var);
+            return NULL;
+        }
+        nc_storage_to_device(batch_mean->storage, NC_DEVICE_CUDA);
+        nc_storage_to_device(batch_var->storage, NC_DEVICE_CUDA);
+        
+        const float* gamma_ptr = (weight && tensor_on_cuda(weight)) ? 
+            (const float*)weight->storage->cuda_data : NULL;
+        const float* beta_ptr = (bias && tensor_on_cuda(bias)) ? 
+            (const float*)bias->storage->cuda_data : NULL;
+        float* rm_ptr = (running_mean && tensor_on_cuda(running_mean)) ?
+            (float*)running_mean->storage->cuda_data : NULL;
+        float* rv_ptr = (running_var && tensor_on_cuda(running_var)) ?
+            (float*)running_var->storage->cuda_data : NULL;
+        
+        nc_cuda_batchnorm_forward_f32(
+            (float*)out->storage->cuda_data,
+            (const float*)input->storage->cuda_data,
+            gamma_ptr, beta_ptr,
+            rm_ptr, rv_ptr,
+            (float*)batch_mean->storage->cuda_data,
+            (float*)batch_var->storage->cuda_data,
+            (int)N, (int)C, (int)L,
+            (float)momentum, (float)eps,
+            training);
+            
+         // Setup autograd
+        if (nc_grad_enabled() && (input->requires_grad || 
+            (weight && weight->requires_grad) || (bias && bias->requires_grad))) {
+            out->requires_grad = true;
+            out->is_leaf = false;
+            nc_node* node = nc_node_create("batchnorm1d", nc_backward_batchnorm1d);
+            if (node) {
+                nc_node_add_input(node, input);
+                if (weight) nc_node_add_input(node, weight);
+                if (bias) nc_node_add_input(node, bias);
+                nc_node_save_tensor(node, input);
+                nc_node_save_tensor(node, weight);
+                nc_node_save_owned_tensor(node, batch_mean);
+                nc_node_save_owned_tensor(node, batch_var);
+                nc_tensor* eps_t = nc_tensor_scalar(eps, NC_F64);
+                nc_node_save_owned_tensor(node, eps_t);
+                node->output = out;
+                out->grad_fn = node;
+            } else {
+                nc_tensor_free(batch_mean);
+                nc_tensor_free(batch_var);
+            }
+        } else {
+            nc_tensor_free(batch_mean);
+            nc_tensor_free(batch_var);
+        }
+        return out;
+    }
+#endif
+
     // Tensors for batch statistics (used in backward)
     size_t c_shape[] = {C};
     nc_tensor* batch_mean = nc_tensor_zeros(c_shape, 1, input->dtype);

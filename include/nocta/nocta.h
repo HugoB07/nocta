@@ -12,6 +12,7 @@
 #include "nocta/core/memory.h"
 #include "nocta/core/tensor.h"
 #include "nocta/core/serialize.h"
+#include "nocta/core/device.h"
 
 // ============================================
 // Autograd
@@ -58,9 +59,17 @@
 
 static inline void nc_init(void) {
     // Future: initialize RNG, thread pool, etc.
+#ifdef NOCTA_CUDA_ENABLED
+    if (nc_cuda_available()) {
+        nc_cuda_init();
+    }
+#endif
 }
 
 static inline void nc_cleanup(void) {
+#ifdef NOCTA_CUDA_ENABLED
+    nc_cuda_cleanup();
+#endif
     nc_memory_report();
 }
 

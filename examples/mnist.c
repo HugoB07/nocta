@@ -7,6 +7,7 @@
 #include "nocta/nocta.h"
 #include "nocta/nn/conv.h"
 #include "nocta/nn/batchnorm.h"
+#include "nocta/optim/sgd.h"
 
 #ifdef NOCTA_OPENMP_ENABLED
 #include <omp.h>
@@ -89,7 +90,7 @@ static void free_mnist(mnist_dataset* ds) {
     nc_free(ds);
 }
 
-static void get_batch(mnist_dataset* ds, size_t start, size_t bs, nc_tensor** x, nc_tensor** y) {
+static void get_batch(mnist_dataset* ds, size_t start, size_t bs, nc_tensor** x, nc_tensor** y, nc_device_type device) {
     if (start + bs > ds->n_samples) bs = ds->n_samples - start;
     size_t xs[] = {bs, 1, 28, 28}, ys[] = {bs};
     *x = nc_tensor_empty(xs, 4, NC_F32);
@@ -99,6 +100,14 @@ static void get_batch(mnist_dataset* ds, size_t start, size_t bs, nc_tensor** x,
             nc_tensor_set4(*x, i, 0, j/28, j%28, nc_tensor_get4(ds->images, start+i, 0, j/28, j%28));
         nc_tensor_set1(*y, i, nc_tensor_get1(ds->labels, start+i));
     }
+#ifdef NOCTA_CUDA_ENABLED
+    if (device == NC_DEVICE_CUDA) {
+        nc_tensor_to_device(*x, NC_DEVICE_CUDA);
+        nc_tensor_to_device(*y, NC_DEVICE_CUDA);
+    }
+#else
+    (void)device;
+#endif
 }
 
 // ============================================
@@ -132,6 +141,27 @@ static void lenet_free(lenet* m) {
     nc_free(m);
 }
 
+#ifdef NOCTA_CUDA_ENABLED
+static void module_to_device(nc_module* m, nc_device_type device) {
+    if (!m) return;
+    for (size_t i = 0; i < m->n_params; i++) {
+        if (m->params[i]) {
+            nc_tensor_to_device(m->params[i], device);
+        }
+    }
+}
+
+static void lenet_to_device(lenet* m, nc_device_type device) {
+    module_to_device(m->conv1, device);
+    module_to_device(m->bn1, device);
+    module_to_device(m->conv2, device);
+    module_to_device(m->bn2, device);
+    module_to_device(m->fc1, device);
+    module_to_device(m->bn_fc, device);
+    module_to_device(m->fc2, device);
+}
+#endif
+
 static void lenet_train_mode(lenet* m, bool training) {
     nc_module_train(m->conv1, training);
     nc_module_train(m->bn1, training);
@@ -161,11 +191,40 @@ static void lenet_print(lenet* m) {
                     nc_module_num_parameters(m->fc1) + nc_module_num_parameters(m->bn_fc) +
                     nc_module_num_parameters(m->fc2);
     printf("Total parameters: %zu\n\n", total);
+    printf("Total parameters: %zu\n\n", total);
+}
+
+// Backward for flatten/reshape
+static nc_tensor** lenet_backward_reshape(nc_tensor* grad, nc_tensor** saved, size_t n) {
+    nc_tensor* input = saved[0];
+    nc_tensor** grads = nc_calloc(1, sizeof(nc_tensor*));
+    grads[0] = nc_tensor_reshape(grad, input->shape, input->ndim);
+    return grads;
+}
+
+static nc_tensor* lenet_flatten(nc_tensor* x) {    // Reshape for fully connected layers
+    size_t batch_size = x->shape[0];
+    size_t flat_size = x->numel / batch_size;
+    size_t new_shape[] = {batch_size, flat_size};
+    nc_tensor* out = nc_tensor_reshape(x, new_shape, 2);
+    
+    if (out && x->requires_grad) {
+        // Create autograd node to connect graph
+        nc_node* node = nc_node_create("flatten", lenet_backward_reshape);
+        nc_node_add_input(node, x);
+        nc_node_save_tensor(node, x);
+        node->output = out;
+        out->grad_fn = node;
+        out->is_leaf = false;
+        out->requires_grad = true;
+    }
+    return out;
 }
 
 static nc_tensor* lenet_forward(lenet* m, nc_tensor* x, nc_tensor** intermediates, size_t* n_inter) {
     *n_inter = 0;
     x->requires_grad = true;
+    fflush(stdout);
     
     // Conv1 -> BN1 -> ReLU -> Pool
     nc_tensor* h = nc_module_forward(m->conv1, x);
@@ -188,19 +247,7 @@ static nc_tensor* lenet_forward(lenet* m, nc_tensor* x, nc_tensor** intermediate
     intermediates[(*n_inter)++] = a;
     
     // Flatten
-    size_t batch = a->shape[0];
-    size_t channels = a->shape[1];
-    size_t flat_size = channels * 7 * 7;
-    size_t flat_shape[] = {batch, flat_size};
-    nc_tensor* flat = nc_tensor_empty(flat_shape, 2, a->dtype);
-    flat->requires_grad = true;
-    for (size_t b = 0; b < batch; b++) {
-        size_t idx = 0;
-        for (size_t c = 0; c < channels; c++)
-            for (size_t i = 0; i < 7; i++)
-                for (size_t j = 0; j < 7; j++)
-                    nc_tensor_set2(flat, b, idx++, nc_tensor_get4(a, b, c, i, j));
-    }
+    nc_tensor* flat = lenet_flatten(a);
     intermediates[(*n_inter)++] = flat;
     
     // FC1 -> BN_FC -> ReLU -> FC2
@@ -223,28 +270,6 @@ static void lenet_zero_grad(lenet* m) {
     nc_module_zero_grad(m->fc1);
     nc_module_zero_grad(m->bn_fc);
     nc_module_zero_grad(m->fc2);
-}
-
-static void lenet_sgd_step(lenet* m, double lr) {
-    nc_tensor* params[] = {
-        nc_conv2d_weight(m->conv1),
-        nc_batchnorm2d_weight(m->bn1), nc_batchnorm2d_bias(m->bn1),
-        nc_conv2d_weight(m->conv2),
-        nc_batchnorm2d_weight(m->bn2), nc_batchnorm2d_bias(m->bn2),
-        nc_linear_weight(m->fc1),
-        nc_module_get_param(m->bn_fc, "weight"), nc_module_get_param(m->bn_fc, "bias"),
-        nc_linear_weight(m->fc2), nc_linear_bias(m->fc2)
-    };
-    int n_params = sizeof(params) / sizeof(params[0]);
-    
-    for (int i = 0; i < n_params; i++) {
-        if (!params[i] || !params[i]->grad) continue;
-        for (size_t j = 0; j < params[i]->numel; j++) {
-            double p = nc_tensor_get_flat(params[i], j);
-            double g = nc_tensor_get_flat(params[i]->grad, j);
-            nc_tensor_set_flat(params[i], j, p - lr * g);
-        }
-    }
 }
 
 // ============================================
@@ -318,18 +343,7 @@ static nc_tensor* lenet_forward_infer(lenet* m, nc_tensor* x) {
     a = nc_module_forward(m->pool, h); nc_tensor_free(h);
     
     // Flatten
-    size_t batch = a->shape[0];
-    size_t channels = a->shape[1];
-    size_t flat_size = channels * 7 * 7;
-    size_t flat_shape[] = {batch, flat_size};
-    nc_tensor* flat = nc_tensor_empty(flat_shape, 2, a->dtype);
-    for (size_t b = 0; b < batch; b++) {
-        size_t idx = 0;
-        for (size_t c = 0; c < channels; c++)
-            for (size_t i = 0; i < 7; i++)
-                for (size_t j = 0; j < 7; j++)
-                    nc_tensor_set2(flat, b, idx++, nc_tensor_get4(a, b, c, i, j));
-    }
+    nc_tensor* flat = lenet_flatten(a);
     nc_tensor_free(a);
     
     // FC1 -> BN_FC -> ReLU -> FC2
@@ -342,16 +356,22 @@ static nc_tensor* lenet_forward_infer(lenet* m, nc_tensor* x) {
     return logits;
 }
 
-static double compute_accuracy(lenet* m, mnist_dataset* ds, size_t max_n) {
+static double compute_accuracy(lenet* m, mnist_dataset* ds, size_t max_n, nc_device_type device) {
     lenet_train_mode(m, false);  // Eval mode for BatchNorm
     
     size_t correct = 0, total = (max_n < ds->n_samples) ? max_n : ds->n_samples;
     for (size_t i = 0; i < total; i += 32) {
         size_t bs = (i + 32 <= total) ? 32 : (total - i);
         nc_tensor *x, *y;
-        get_batch(ds, i, bs, &x, &y);
+        get_batch(ds, i, bs, &x, &y, device);
         nc_tensor* logits = lenet_forward_infer(m, x);
+        
+        // nc_argmax doesn't have CUDA support - must copy logits to CPU first
+        nc_tensor_to_device(logits, NC_DEVICE_CPU);
         nc_tensor* preds = nc_argmax(logits, 1, false);
+        
+        // Also copy labels to CPU for reading values
+        nc_tensor_to_device(y, NC_DEVICE_CPU);
         for (size_t j = 0; j < bs; j++)
             if ((int)nc_tensor_get1(preds, j) == (int)nc_tensor_get1(y, j)) correct++;
         nc_tensor_free(x); nc_tensor_free(y);
@@ -395,19 +415,72 @@ int main(int argc, char** argv) {
     lenet* model = lenet_create();
     lenet_print(model);
     
-    // Training
+    // Detect GPU
+    nc_device_type device = NC_DEVICE_CPU;
+#ifdef NOCTA_CUDA_ENABLED
+    if (nc_cuda_available()) {
+        device = NC_DEVICE_CUDA;
+        printf("GPU detected! Moving model to CUDA...\n");
+        lenet_to_device(model, NC_DEVICE_CUDA);
+        nc_device_info info = nc_cuda_device_info(0);
+        printf("Using: %s\n\n", info.name);
+    } else {
+        printf("No GPU available. Using CPU.\n\n");
+    }
+#else
+    printf("CUDA not compiled. Using CPU.\n\n");
+#endif
+    
+    // Training parameters
     double lr = 0.01;
-    size_t epochs = 5, batch_size = 64;
-    printf("Training: lr=%.3f, batch=%zu, epochs=%zu\n\n", lr, batch_size, epochs);
+    size_t epochs = 5, batch_size = 256;
+
+    // Optimizer Setup
+    nc_tensor* params[32];
+    size_t n_params = 0;
+    
+    // Collect params
+    params[n_params++] = nc_conv2d_weight(model->conv1);
+    params[n_params++] = nc_conv2d_bias(model->conv1);
+    params[n_params++] = nc_batchnorm2d_weight(model->bn1);
+    params[n_params++] = nc_batchnorm2d_bias(model->bn1);
+    params[n_params++] = nc_conv2d_weight(model->conv2);
+    params[n_params++] = nc_conv2d_bias(model->conv2);
+    params[n_params++] = nc_batchnorm2d_weight(model->bn2);
+    params[n_params++] = nc_batchnorm2d_bias(model->bn2);
+    params[n_params++] = nc_linear_weight(model->fc1); // fc1 has no bias
+    params[n_params++] = nc_module_get_param(model->bn_fc, "weight");
+    params[n_params++] = nc_module_get_param(model->bn_fc, "bias");
+    params[n_params++] = nc_linear_weight(model->fc2);
+    params[n_params++] = nc_linear_bias(model->fc2);
+
+    // Create SGD optimizer with momentum
+    nc_sgd_config sgd_conf = NC_SGD_DEFAULT;
+    sgd_conf.momentum = 0.9;
+    sgd_conf.weight_decay = 0.0;
+    nc_optimizer* optimizer = nc_sgd(lr, sgd_conf);
+    
+    // Add parameters to optimizer
+    for (size_t i = 0; i < n_params; i++) {
+        if (params[i]) nc_optimizer_add_param(optimizer, params[i]);
+    }
+    
+    printf("Training: lr=%.3f, momentum=%.1f, batch=%zu, epochs=%zu\n\n", 
+           lr, sgd_conf.momentum, batch_size, epochs);
     
     for (size_t e = 0; e < epochs; e++) {
-        lenet_train_mode(model, true);  // Training mode for BatchNorm
+        lenet_train_mode(model, true);
         double loss_sum = 0;
         size_t n_batches = 0;
         
+        nc_tensor* total_loss_t = nc_tensor_scalar(0.0f, NC_F32);
+        #ifdef NOCTA_CUDA_ENABLED
+        if (device == NC_DEVICE_CUDA) nc_tensor_to_device(total_loss_t, NC_DEVICE_CUDA);
+        #endif
+        
         for (size_t i = 0; i < train->n_samples; i += batch_size) {
             nc_tensor *x, *y;
-            get_batch(train, i, batch_size, &x, &y);
+            get_batch(train, i, batch_size, &x, &y, device);
             
             printf("\r  Batch %zu/%zu", i/batch_size + 1, (train->n_samples + batch_size - 1)/batch_size);
             fflush(stdout);
@@ -419,11 +492,13 @@ int main(int argc, char** argv) {
             nc_tensor* logits = lenet_forward(model, x, intermediates, &n_inter);
             
             nc_tensor* loss = nc_cross_entropy_loss(logits, y);
-            loss_sum += nc_tensor_get_flat(loss, 0);
+            nc_add_(total_loss_t, loss);
             n_batches++;
             
             nc_backward_scalar(loss);
-            lenet_sgd_step(model, lr);
+            
+            // Use optimizer to update weights
+            nc_optimizer_step(optimizer);
             
             nc_tensor_free(x); nc_tensor_free(y);
             nc_tensor_free(logits); nc_tensor_free(loss);
@@ -431,11 +506,15 @@ int main(int argc, char** argv) {
                 nc_tensor_free(intermediates[j]);
             }
         }
-        printf("\r                              \r");
+        printf("\r                              \r"); // Clear the batch progress line
+        
+        nc_tensor_to_device(total_loss_t, NC_DEVICE_CPU);
+        loss_sum = nc_tensor_get_flat(total_loss_t, 0);
+        nc_tensor_free(total_loss_t);
         
         double avg_loss = loss_sum / n_batches;
-        double train_acc = compute_accuracy(model, train, 500);
-        double test_acc = compute_accuracy(model, test, 200);
+        double train_acc = compute_accuracy(model, train, 500, device);
+        double test_acc = compute_accuracy(model, test, 200, device);
         printf("Epoch %zu: Loss=%.4f, Train=%.1f%%, Test=%.1f%%\n", 
                e+1, avg_loss, train_acc, test_acc);
     }
@@ -449,9 +528,10 @@ int main(int argc, char** argv) {
     printf("\nTesting load...\n");
     lenet* loaded = lenet_create();
     load_model(loaded, "mnist_cnn_bn.ncta");
-    printf("Loaded model accuracy: %.1f%%\n", compute_accuracy(loaded, test, 200));
+    printf("Loaded model accuracy: %.1f%%\n", compute_accuracy(loaded, test, 200, NC_DEVICE_CPU));
     
     // Cleanup
+    nc_optimizer_free(optimizer);
     lenet_free(model);
     lenet_free(loaded);
     free_mnist(train);

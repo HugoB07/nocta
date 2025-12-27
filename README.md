@@ -13,9 +13,12 @@ Nocta provides PyTorch-like functionality with automatic differentiation, tensor
 - **Optimizers**: SGD (with momentum, Nesterov), Adam, AdamW
 - **Serialization**: Save/load tensors, models, and training checkpoints in custom .ncta format
 - **Memory Efficient**: Reference-counted storage, aligned allocations, detailed memory tracking
-- **Hardware Acceleration**: Multi-threading support via OpenMP and SIMD optimizations (AVX2/FMA)
+- **Hardware Acceleration**: 
+  - **CUDA/cuBLAS** for GPU acceleration (NVIDIA GPUs)
+  - Multi-threading support via OpenMP
+  - SIMD optimizations (AVX2/FMA)
 - **Cross-Platform**: Works on Windows (MSVC), Linux (GCC), and macOS (Clang)
-- **Zero Dependencies**: No external libraries required
+- **Zero Dependencies**: No external libraries required (CUDA optional)
 
 ## Quick Start
 
@@ -70,8 +73,23 @@ cmake --build . --config Release
 | `NOCTA_BUILD_EXAMPLES` | ON | Build example programs |
 | `NOCTA_ENABLE_SIMD` | ON | Enable AVX2 SIMD optimizations |
 | `NOCTA_ENABLE_OPENMP` | ON | Enable OpenMP multi-threading |
+| `NOCTA_ENABLE_CUDA` | OFF | Enable CUDA/cuBLAS GPU acceleration |
 
 > **Note**: For best performance, always build in **Release** mode. Debug builds disable optimizations and can be significantly slower.
+
+### Building with CUDA
+
+To enable GPU acceleration, you need CUDA Toolkit installed. Then configure CMake with:
+
+```bash
+mkdir build && cd build
+cmake .. -DNOCTA_ENABLE_CUDA=ON \
+         -DCUDAToolkit_ROOT=/usr/local/cuda-12.x/ \
+         -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.x/bin/nvcc
+cmake --build . --config Release
+```
+
+Replace `cuda-12.x` with your installed CUDA version (e.g., `cuda-12.9`).
 
 ## Example: CNN with BatchNorm
 
@@ -185,9 +203,16 @@ nocta/
 │   ├── autograd/        # Automatic differentiation
 │   ├── ops/             # Operations (arithmetic, matmul, activations)
 │   ├── nn/              # Neural network modules (linear, conv, batchnorm)
-│   └── optim/           # Optimizers
-├── src/                 # Implementation files
-├── examples/            # Example programs
+│   ├── optim/           # Optimizers
+│   └── cuda/            # CUDA kernel declarations
+├── src/
+│   ├── autograd/        # Automatic differentiation implementations
+│   ├── core/            # Core implementations
+│   ├── ops/             # Operation implementations
+│   ├── nn/              # Module implementations
+│   ├── optim/           # Optimizer implementations
+│   └── cuda/            # CUDA kernel implementations (.cu files)
+├── examples/            # Example programs (mnist, xor, etc.)
 └── CMakeLists.txt
 ```
 
@@ -199,7 +224,7 @@ nocta/
 - [x] SIMD optimizations (AVX2/FMA)
 - [x] Multi-threading (OpenMP)
 - [x] Dropout
-- [ ] GPU support (OpenCL/CUDA)
+- [x] GPU support (CUDA/cuBLAS)
 
 ## License
 

@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "device.h"
 
 // Platform-specific atomics
 #ifdef _MSC_VER
@@ -55,15 +56,24 @@ void nc_memory_stats_reset(void);
 // Print memory report
 void nc_memory_report(void);
 
-// Reference counting for shared data
+// ============================================
+// Device-aware Storage
+// ============================================
+
+// Reference counting for shared data with device support
 typedef struct {
-    void* data;
+    void* data;              // CPU data pointer (NULL if on GPU only)
+    void* cuda_data;         // CUDA device pointer (NULL if on CPU only)
     size_t size;
     nc_atomic_int refcount;
+    nc_device_type device;   // Primary device location
 } nc_storage;
 
-// Create storage
+// Create storage on default device
 nc_storage* nc_storage_create(size_t size);
+
+// Create storage on specific device
+nc_storage* nc_storage_create_on(size_t size, nc_device_type device);
 
 // Increment refcount
 nc_storage* nc_storage_retain(nc_storage* storage);
@@ -73,5 +83,21 @@ void nc_storage_release(nc_storage* storage);
 
 // Get refcount
 int nc_storage_refcount(const nc_storage* storage);
+
+// ============================================
+// Device Transfer
+// ============================================
+
+// Transfer storage to target device (creates copy on target if needed)
+void nc_storage_to_device(nc_storage* s, nc_device_type target);
+
+// Ensure data is available on target device (syncs if needed)
+void nc_storage_ensure_on(nc_storage* s, nc_device_type target);
+
+// Get pointer to data on current device
+void* nc_storage_data_ptr(nc_storage* s);
+
+// Synchronize storage from GPU to CPU (for reading)
+void nc_storage_sync_to_cpu(nc_storage* s);
 
 #endif // NOCTA_MEMORY_H

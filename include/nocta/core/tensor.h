@@ -240,4 +240,11 @@ void nc_tensor_fill_(nc_tensor* t, double value);
 // Copy data from src to dst
 nc_error nc_tensor_copy_(nc_tensor* dst, const nc_tensor* src);
 
+// ============================================
+// Device Transfer
+// ============================================
+
+// Move tensor to specified device (CPU or CUDA)
+void nc_tensor_to_device(nc_tensor* t, nc_device_type device);
+
 #endif // NOCTA_TENSOR_H

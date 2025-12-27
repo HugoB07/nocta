@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.18)
 project(nocta VERSION 0.5.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
@@ -8,6 +8,26 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 option(NOCTA_BUILD_EXAMPLES "Build examples" ON)
 option(NOCTA_ENABLE_SIMD "Enable SIMD optimizations" ON)
 option(NOCTA_ENABLE_OPENMP "Enable OpenMP multi-threading" ON)
+option(NOCTA_ENABLE_CUDA "Enable CUDA GPU backend" OFF)
+
+# ============================================
+# CUDA Support
+# ============================================
+if(NOCTA_ENABLE_CUDA)
+    # Set CUDA architectures BEFORE enable_language(CUDA)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89 90)
+    endif()
+    
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    
+    set(CMAKE_CUDA_STANDARD 14)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    
+    add_compile_definitions(NOCTA_CUDA_ENABLED)
+    message(STATUS "CUDA enabled. Found: ${CUDAToolkit_VERSION}")
+endif()
 
 # Find OpenMP
 if(NOCTA_ENABLE_OPENMP)
@@ -40,10 +60,13 @@ else()
     endif()
 endif()
 
+# ============================================
 # Sources
+# ============================================
 set(NOCTA_SOURCES
     src/core/tensor.c
     src/core/memory.c
+    src/core/device.c
     src/core/serialize.c
     src/autograd/node.c
     src/autograd/backward.c
@@ -62,8 +85,30 @@ set(NOCTA_SOURCES
     src/optim/adam.c
 )
 
-# Static library
-add_library(nocta STATIC ${NOCTA_SOURCES})
+# CUDA sources
+if(NOCTA_ENABLE_CUDA)
+    set(NOCTA_CUDA_SOURCES
+        src/cuda/cuda_device.cu
+        src/cuda/cuda_elementwise.cu
+        src/cuda/cuda_activation.cu
+        src/cuda/cuda_matmul.cu
+        src/cuda/cuda_reduction.cu
+        src/cuda/cuda_conv.cu
+        src/cuda/cuda_batchnorm.cu
+        src/cuda/cuda_loss.cu
+    )
+endif()
+
+# ============================================
+# Library
+# ============================================
+if(NOCTA_ENABLE_CUDA)
+    add_library(nocta STATIC ${NOCTA_SOURCES} ${NOCTA_CUDA_SOURCES})
+    set_target_properties(nocta PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+    target_link_libraries(nocta PUBLIC CUDA::cudart CUDA::cublas)
+else()
+    add_library(nocta STATIC ${NOCTA_SOURCES})
+endif()
 
 target_include_directories(nocta
     PUBLIC
@@ -82,7 +127,9 @@ if(NOCTA_ENABLE_OPENMP AND OpenMP_C_FOUND)
     target_link_libraries(nocta PUBLIC OpenMP::OpenMP_C)
 endif()
 
+# ============================================
 # Examples
+# ============================================
 if(NOCTA_BUILD_EXAMPLES)
     add_executable(example_xor examples/xor.c)
     target_link_libraries(example_xor PRIVATE nocta)
@@ -101,4 +148,7 @@ if(NOCTA_BUILD_EXAMPLES)
 
     add_executable(dropout_test examples/dropout_test.c)
     target_link_libraries(dropout_test PRIVATE nocta)
+
+    add_executable(benchmark_gpu examples/benchmark_gpu.c)
+    target_link_libraries(benchmark_gpu PRIVATE nocta)
 endif()

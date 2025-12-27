@@ -12,6 +12,20 @@
 #include <immintrin.h>
 #endif
 
+#ifdef NOCTA_CUDA_ENABLED
+#include "nocta/cuda/cuda_kernels.h"
+#endif
+
+// Helper to check if tensor is on CUDA
+static inline bool tensor_on_cuda(nc_tensor* t) {
+#ifdef NOCTA_CUDA_ENABLED
+    return t && t->storage && t->storage->device == NC_DEVICE_CUDA;
+#else
+    (void)t;
+    return false;
+#endif
+}
+
 // ============================================
 // Backward
 // ============================================
@@ -70,6 +84,44 @@ static nc_tensor* matmul_2d(nc_tensor* a, nc_tensor* b) {
     size_t out_shape[] = {M, N};
     nc_tensor* out = nc_tensor_zeros(out_shape, 2, dtype);
     if (!out) return NULL;
+    
+#ifdef NOCTA_CUDA_ENABLED
+    // CUDA path using cuBLAS
+    if (tensor_on_cuda(a) && tensor_on_cuda(b) && dtype == NC_F32) {
+        int transA = -1;
+        int transB = -1;
+        
+        // Check layout A (MxK)
+        // RowMajor: stride[0]=K, stride[1]=1
+        if (a->strides[1] == 1 && a->strides[0] == K) transA = 0;
+        // ColMajor: stride[0]=1, stride[1]=M (from tensor view perspective, but shape is MxK)
+        // Wait. If A is transposed from (KxM), strides are [1, M] (swapped).
+        // A[i,j] = ptr + i*1 + j*M.
+        // Corresponds to ColMajor stored matrix (MxK) where column stride is M?
+        // No, ColMajor Matrix MxK has element (i,j) at i + j*M.
+        // Yes. So if stride[0]=1 and stride[1]=M, it IS ColMajor.
+        else if (a->strides[0] == 1 && a->strides[1] == M) transA = 1;
+        
+        // Check layout B (rows x N) -> (K x N)
+        // RowMajor: stride[0]=N, stride[1]=1
+        if (b->strides[1] == 1 && b->strides[0] == N) transB = 0;
+        // ColMajor: stride[0]=1, stride[1]=K (shape[0]=K)
+        else if (b->strides[0] == 1 && b->strides[1] == K) transB = 1;
+        
+        if (transA != -1 && transB != -1) {
+            nc_storage_to_device(out->storage, NC_DEVICE_CUDA);
+            // nc_cuda_memset not strictly needed if beta=0, but good for safety
+            nc_cuda_matmul_f32(
+                (float*)out->storage->cuda_data,
+                (const float*)a->storage->cuda_data,
+                (const float*)b->storage->cuda_data,
+                (int)M, (int)N, (int)K,
+                1.0f, 0.0f,
+                transA, transB);
+            return out;
+        }
+    }
+#endif
     
     nc_tensor* a_cont = nc_tensor_is_contiguous(a) ? a : nc_tensor_contiguous(a);
     nc_tensor* b_cont = nc_tensor_is_contiguous(b) ? b : nc_tensor_contiguous(b);
