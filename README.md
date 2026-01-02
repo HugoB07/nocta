@@ -66,6 +66,18 @@ cmake ..
 cmake --build . --config Release
 ```
 
+### Running Tests
+
+To run the unit test suite:
+
+```bash
+# Run all tests
+ctest -C Release
+
+# Run with verbose output
+ctest -C Release --verbose
+```
+
 ### Options
 
 | Option | Default | Description |

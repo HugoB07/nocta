@@ -152,3 +152,29 @@ if(NOCTA_BUILD_EXAMPLES)
     add_executable(benchmark_gpu examples/benchmark_gpu.c)
     target_link_libraries(benchmark_gpu PRIVATE nocta)
 endif()
+
+# ============================================
+# Testing
+# ============================================
+enable_testing()
+
+add_executable(unit_tests
+    tests/test_main.c
+    tests/test_tensor.c
+    tests/test_ops.c
+    tests/test_autograd.c
+    tests/test_nn.c
+    tests/test_optim.c
+    tests/test_io.c
+    tests/test_reduction.c
+)
+
+target_link_libraries(unit_tests PRIVATE nocta)
+
+add_test(NAME Tensors COMMAND unit_tests tensor)
+add_test(NAME Operations COMMAND unit_tests ops)
+add_test(NAME Autograd COMMAND unit_tests autograd)
+add_test(NAME NeuralNet COMMAND unit_tests nn)
+add_test(NAME Optimizers COMMAND unit_tests optim)
+add_test(NAME IO COMMAND unit_tests io)
+add_test(NAME Reductions COMMAND unit_tests reduction)
