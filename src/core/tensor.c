@@ -755,3 +755,51 @@ void nc_tensor_to_device(nc_tensor* t, nc_device_type device) {
         nc_tensor_to_device(t->grad, device);
     }
 }
+
+// ============================================
+// GC Support
+// ============================================
+
+void nc_tensor_mark_reachable(nc_tensor* t) {
+    if (!t || t->is_reachable) return;
+    t->is_reachable = true;
+
+    // Mark gradients
+    if (t->grad) nc_tensor_mark_reachable(t->grad);
+
+    // Mark Autograd Graph
+    if (t->grad_fn) {
+        nc_node* node = t->grad_fn;
+        // Mark inputs
+        for (size_t i = 0; i < node->n_inputs; i++) {
+             if (node->inputs[i]) nc_tensor_mark_reachable(node->inputs[i]);
+        }
+        // Mark saved tensors
+        for (size_t i = 0; i < node->n_saved; i++) {
+             if (node->saved_tensors[i]) nc_tensor_mark_reachable(node->saved_tensors[i]);
+        }
+    }
+}
+
+bool nc_tensor_is_reachable(const nc_tensor* t) {
+    return t ? t->is_reachable : false;
+}
+
+void nc_tensor_reset_reachable(nc_tensor* t) {
+    if (!t || !t->is_reachable) return;
+    t->is_reachable = false;
+    
+    // Recurse to clear flags on children that might have been marked by GC
+    if (t->grad) nc_tensor_reset_reachable(t->grad);
+    
+    // Also clear graph if it was marked
+    if (t->grad_fn) {
+        nc_node* node = t->grad_fn;
+        for (size_t i = 0; i < node->n_inputs; i++) {
+             nc_tensor_reset_reachable(node->inputs[i]);
+        }
+        for (size_t i = 0; i < node->n_saved; i++) {
+             nc_tensor_reset_reachable(node->saved_tensors[i]);
+        }
+    }
+}

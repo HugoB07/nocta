@@ -35,6 +35,7 @@ typedef struct nc_tensor {
 
     // Flags
     bool is_contiguous;
+    bool is_reachable;
 } nc_tensor;
 
 // ============================================
@@ -201,6 +202,19 @@ nc_tensor* nc_tensor_detach(const nc_tensor* t);
 
 // Zero gradient in-place
 void nc_tensor_zero_grad_(nc_tensor* t);
+
+// ============================================
+// GC Support
+// ============================================
+
+// Recursively mark tensor and its graph as reachable
+void nc_tensor_mark_reachable(nc_tensor* t);
+
+// Check if tensor is marked reachable
+bool nc_tensor_is_reachable(const nc_tensor* t);
+
+// Reset reachable flag (for sweep phase)
+void nc_tensor_reset_reachable(nc_tensor* t);
 
 // ============================================
 // Type conversion

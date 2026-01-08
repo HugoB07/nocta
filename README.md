@@ -19,39 +19,75 @@ Nocta provides PyTorch-like functionality with automatic differentiation, tensor
   - SIMD optimizations (AVX2/FMA)
 - **Cross-Platform**: Works on Windows (MSVC), Linux (GCC), and macOS (Clang)
 - **Zero Dependencies**: No external libraries required (CUDA optional)
+- **Nocta Language**: Native scripting language (`.noc`) for rapid prototyping and training without recompilation
 
 ## Quick Start
+
+### 1. Nocta Language (Scripting)
+
+The fastest way to use Nocta is via its built-in scripting language, which offers Python-like syntax with native performance.
+
+**`mnist.noc`**
+```cs
+// Define a LeNet-like model
+class LeNet {
+    void init() {
+        this.c1 = randn(6, 1, 5, 5) * 0.1; requires_grad(this.c1, true);
+        this.l1 = randn(120, 16*4*4) * 0.1; requires_grad(this.l1, true);
+    }
+    
+    var forward(x) {
+        x = conv2d(x, this.c1, nil, 1, 0);
+        x = relu(x);
+        x = max_pool2d(x, 2, 2);
+        // ... more layers ...
+        return x;
+    }
+}
+
+// Training loop
+var model = LeNet();
+model.init();
+
+var data = load_mnist(); // Custom helper
+for (var i in range(0, 1000)) {
+    var pred = model.forward(data.x);
+    var loss = cross_entropy(pred, data.y);
+    
+    backward(loss);
+    // optimizer step...
+    print("Loss: " + loss);
+}
+```
+
+Run it immediately:
+```bash
+./nocta_cli examples/mnist.noc
+```
+
+### 2. C API (Embedded)
+
+You can also use Nocta as a pure C library in your own applications.
 
 ```c
 #include "nocta/nocta.h"
 
 int main() {
-    // Create tensors
-    size_t shape[] = {2, 3};
-    nc_tensor* a = nc_tensor_randn(shape, 2, NC_F32);
-    nc_tensor* b = nc_tensor_randn(shape, 2, NC_F32);
+    // Operations
+    nc_tensor* a = nc_tensor_randn((size_t[]){2, 3}, 2, NC_F32);
+    nc_tensor* b = nc_tensor_randn((size_t[]){2, 3}, 2, NC_F32);
     
-    // Enable gradients
     nc_tensor_requires_grad_(a, true);
     
-    // Operations
     nc_tensor* c = nc_add(a, b);
-    nc_tensor* d = nc_relu(c);
-    nc_tensor* loss = nc_mean_all(d);
+    nc_tensor* loss = nc_mean_all(nc_relu(c));
     
     // Backward pass
     nc_backward_scalar(loss);
     
-    // Access gradients
     printf("Gradient: %f\n", nc_tensor_get_flat(a->grad, 0));
     
-    // Cleanup
-    nc_tensor_free(a);
-    nc_tensor_free(b);
-    nc_tensor_free(c);
-    nc_tensor_free(d);
-    nc_tensor_free(loss);
-    
+    nc_tensor_free(a); nc_tensor_free(b); nc_tensor_free(c); nc_tensor_free(loss);
     return 0;
 }
 ```
@@ -102,6 +138,18 @@ cmake --build . --config Release
 ```
 
 Replace `cuda-12.x` with your installed CUDA version (e.g., `cuda-12.9`).
+
+### Nocta CLI
+
+The library now includes a CLI for running `.noc` scripts directly.
+
+```bash
+# Start REPL
+./nocta_cli
+
+# Run a script
+./nocta_cli examples/mnist.noc
+```
 
 ## Example: CNN with BatchNorm
 
@@ -212,6 +260,7 @@ nocta/
 ├── include/nocta/
 │   ├── nocta.h          # Main header
 │   ├── core/            # Tensor, memory, types, serialization
+│   ├── lang/            # Nocta language (compiler, vm, ast)
 │   ├── autograd/        # Automatic differentiation
 │   ├── ops/             # Operations (arithmetic, matmul, activations)
 │   ├── nn/              # Neural network modules (linear, conv, batchnorm)
@@ -220,11 +269,13 @@ nocta/
 ├── src/
 │   ├── autograd/        # Automatic differentiation implementations
 │   ├── core/            # Core implementations
+│   ├── lang/            # Language implementation (lexer, parser, compiler, vm)
 │   ├── ops/             # Operation implementations
 │   ├── nn/              # Module implementations
 │   ├── optim/           # Optimizer implementations
-│   └── cuda/            # CUDA kernel implementations (.cu files)
-├── examples/            # Example programs (mnist, xor, etc.)
+│   ├── cuda/            # CUDA kernel implementations (.cu files)
+│   └── main.c           # CLI entry point
+├── examples/            # Example programs (C and .noc scripts)
 └── CMakeLists.txt
 ```
 
@@ -236,6 +287,7 @@ nocta/
 - [x] SIMD optimizations (AVX2/FMA)
 - [x] Multi-threading (OpenMP)
 - [x] Dropout
+- [x] Nocta Language (Compiler/VM)
 - [x] GPU support (CUDA/cuBLAS)
 
 ## License

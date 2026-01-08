@@ -1,0 +1,326 @@
+// ==============================================
+// MNIST Training with Nocta
+// PyTorch-style training loop with:
+// - Model architecture printing
+// - Progress logging (batch/epoch)
+// - Checkpoint saving/loading
+// ==============================================
+
+print("Loading MNIST...");
+
+// --- Helper Functions ---
+
+var read_u32(data, offset) {
+    var b0 = tensor_get(data, offset);
+    var b1 = tensor_get(data, offset + 1);
+    var b2 = tensor_get(data, offset + 2);
+    var b3 = tensor_get(data, offset + 3);
+    return b0 * 16777216 + b1 * 65536 + b2 * 256 + b3; 
+}
+
+var load_images(path, limit) {
+    print("Reading " + path);
+    var data = read_file(path);
+    if (!data) { print("Failed to read " + path); return nil; }
+    
+    var magic = read_u32(data, 0);
+    var count = read_u32(data, 4);
+    var rows = read_u32(data, 8);
+    var cols = read_u32(data, 12);
+    
+    print("Found " + count + " images (" + rows + "x" + cols + ")");
+    
+    if (count > limit) { count = limit; }
+    
+    var pixel_count = count * rows * cols;
+    var raw = slice(data, 16, pixel_count);
+    var images = raw / 255.0;
+    return images;
+}
+
+var load_labels(path, limit) {
+    print("Reading " + path);
+    var data = read_file(path);
+    if (!data) { return nil; }
+    
+    var count = read_u32(data, 4);
+    print("Found " + count + " labels");
+    
+    if (count > limit) { count = limit; }
+    
+    var raw = slice(data, 8, count);
+    return raw;
+}
+
+// ==============================================
+// LeNet Model
+// ==============================================
+
+class LeNet {
+    void init() {
+        // Conv1: 1 -> 8 channels, 3x3 kernel
+        this.c1_w = randn(8, 1, 3, 3) * 0.47; requires_grad(this.c1_w, true);
+        
+        // BatchNorm1
+        this.bn1_w = zeros(8) + 1; requires_grad(this.bn1_w, true);
+        this.bn1_b = zeros(8);     requires_grad(this.bn1_b, true);
+        this.bn1_rm = zeros(8); 
+        this.bn1_rv = zeros(8) + 1;
+        
+        // Conv2: 8 -> 16 channels, 3x3 kernel
+        this.c2_w = randn(16, 8, 3, 3) * 0.16; requires_grad(this.c2_w, true);
+        
+        // BatchNorm2
+        this.bn2_w = zeros(16) + 1; requires_grad(this.bn2_w, true);
+        this.bn2_b = zeros(16);     requires_grad(this.bn2_b, true);
+        this.bn2_rm = zeros(16); 
+        this.bn2_rv = zeros(16) + 1;
+        
+        // FC1: 784 -> 64
+        this.fc1_w = randn(784, 64) * 0.05; requires_grad(this.fc1_w, true);
+        
+        // BatchNorm FC
+        this.bnfc_w = zeros(64) + 1; requires_grad(this.bnfc_w, true);
+        this.bnfc_b = zeros(64);     requires_grad(this.bnfc_b, true);
+        this.bnfc_rm = zeros(64);
+        this.bnfc_rv = zeros(64) + 1;
+        
+        // FC2: 64 -> 10 (output)
+        this.fc2_w = randn(64, 10) * 0.17; requires_grad(this.fc2_w, true);
+        this.fc2_b = zeros(10);            requires_grad(this.fc2_b, true);
+    }
+    
+    var parameters() {
+        return [
+            this.c1_w, 
+            this.bn1_w, this.bn1_b,
+            this.c2_w,
+            this.bn2_w, this.bn2_b,
+            this.fc1_w,
+            this.bnfc_w, this.bnfc_b,
+            this.fc2_w, this.fc2_b
+        ];
+    }
+    
+    var velocities() {
+        return [
+            zeros(8, 1, 3, 3),
+            zeros(8), zeros(8),
+            zeros(16, 8, 3, 3),
+            zeros(16), zeros(16),
+            zeros(784, 64),
+            zeros(64), zeros(64),
+            zeros(64, 10), zeros(10)
+        ];
+    }
+    
+    var print_architecture() {
+        print_model(
+            "conv1.weight", this.c1_w,
+            "bn1.weight", this.bn1_w,
+            "bn1.bias", this.bn1_b,
+            "conv2.weight", this.c2_w,
+            "bn2.weight", this.bn2_w,
+            "bn2.bias", this.bn2_b,
+            "fc1.weight", this.fc1_w,
+            "bn_fc.weight", this.bnfc_w,
+            "bn_fc.bias", this.bnfc_b,
+            "fc2.weight", this.fc2_w,
+            "fc2.bias", this.fc2_b
+        );
+    }
+    
+    void forward(x, training, batch_N) {
+        // Conv1 + BN + ReLU + Pool
+        var x = conv2d(x, this.c1_w, nil, 1, 1);
+        x = batch_norm2d(x, this.bn1_rm, this.bn1_rv, this.bn1_w, this.bn1_b, training);
+        x = relu(x);
+        x = max_pool2d(x, 2, 2);
+        
+        // Conv2 + BN + ReLU + Pool
+        x = conv2d(x, this.c2_w, nil, 1, 1);
+        x = batch_norm2d(x, this.bn2_rm, this.bn2_rv, this.bn2_w, this.bn2_b, training);
+        x = relu(x);
+        x = max_pool2d(x, 2, 2);
+        
+        // Flatten
+        x = reshape(x, batch_N, 784); 
+        
+        // FC1 + BN + ReLU
+        x = matmul(x, this.fc1_w);
+        x = reshape(x, batch_N, 64, 1, 1);
+        x = batch_norm2d(x, this.bnfc_rm, this.bnfc_rv, this.bnfc_w, this.bnfc_b, training);
+        x = reshape(x, batch_N, 64);
+        x = relu(x);
+        
+        // FC2 (logits)
+        x = matmul(x, this.fc2_w) + this.fc2_b;
+        return x;
+    }
+    
+    void save_checkpoint(epoch, loss, path) {
+        var params = this.parameters();
+        checkpoint_save(epoch, loss, 
+            params[0], params[1], params[2], params[3], params[4], params[5],
+            params[6], params[7], params[8], params[9], params[10], path);
+        print("Checkpoint saved: " + path);
+    }
+}
+
+// ==============================================
+// Training Loop
+// ==============================================
+
+var num_samples = 60000;
+var train_x = load_images("train-images-idx3-ubyte", num_samples);
+var train_y = load_labels("train-labels-idx1-ubyte", num_samples);
+
+var run_training() {
+    if (!train_x) {
+        print("Error: Missing MNIST files. Skipping training.");
+        return;
+    }
+    
+    // Initialize model
+    var model = LeNet();
+    model.init();
+    
+    // Print model architecture
+    print("\n");
+    model.print_architecture();
+    
+    // Hyperparameters
+    var lr = 0.01;
+    var momentum = 0.9;
+    var epochs = 1; 
+    var batch_size = 256;
+    var log_interval = 50;  // Print every N batches
+    var save_interval = 1;  // Save checkpoint every N epochs
+    
+    print("Training Configuration:");
+    print("  Learning Rate: " + lr);
+    print("  Momentum: " + momentum);
+    print("  Batch Size: " + batch_size);
+    print("  Epochs: " + epochs);
+    print("");
+    
+    // Initialize velocities for SGD momentum
+    var vels = model.velocities();
+    var params = model.parameters();
+    var n_params = 11;
+    var n_batches = num_samples / batch_size;
+    
+    var best_loss = 999999.0;
+    
+    var epoch = 0;
+    while (epoch < epochs) {
+        var epoch_loss = 0.0;
+        var epoch_correct = 0;
+        var epoch_samples = 0;
+        var batch_idx = 0;
+        
+        print("Epoch " + (epoch + 1) + "/" + epochs);
+        print("----------------------------");
+        
+        var i = 0;
+        while (i < num_samples) {
+            var current_batch = batch_size;
+            
+            // Skip partial batches
+            if (i + batch_size > num_samples) {
+                i = i + batch_size;
+                continue;
+            }
+            
+            // Get batch data
+            var bx = slice(train_x, i * 784, current_batch * 784);
+            bx = reshape(bx, current_batch, 1, 28, 28);
+            var by = slice(train_y, i, current_batch);
+            
+            // Forward pass
+            var logits = model.forward(bx, true, current_batch);
+            var loss = cross_entropy(logits, by);
+            
+            // Compute accuracy
+            var preds = argmax(logits, 1);
+            var correct = 0;
+            var j = 0;
+            while (j < current_batch) {
+                if (tensor_get(preds, j) == tensor_get(by, j)) { 
+                    correct = correct + 1; 
+                }
+                j = j + 1;
+            }
+            
+            var loss_val = tensor_get(loss, 0);
+            epoch_loss = epoch_loss + loss_val;
+            epoch_correct = epoch_correct + correct;
+            epoch_samples = epoch_samples + current_batch;
+            
+            // Backward pass
+            clear_grad(loss);
+            var p_idx = 0;
+            while (p_idx < n_params) { 
+                clear_grad(params[p_idx]);
+                p_idx = p_idx + 1;
+            }
+            backward(loss);
+            
+            // Optimizer step (SGD with momentum)
+            p_idx = 0;
+            while (p_idx < n_params) {
+                apply_sgd_momentum(params[p_idx], vels[p_idx], lr, momentum);
+                p_idx = p_idx + 1;
+            }
+            
+            // Progress logging
+            if (batch_idx % log_interval == 0) {
+                var acc_pct = correct / current_batch * 100;
+                print("  Batch " + batch_idx + "/" + n_batches + 
+                      " | Loss: " + loss_val + 
+                      " | Acc: " + acc_pct + "%");
+            }
+            
+            batch_idx = batch_idx + 1;
+            i = i + current_batch;
+        }
+        
+        // Epoch summary
+        var avg_loss = epoch_loss / batch_idx;
+        var avg_acc = epoch_correct / epoch_samples * 100;
+        
+        print("");
+        print("Epoch " + (epoch + 1) + " Summary:");
+        print("  Avg Loss: " + avg_loss);
+        print("  Accuracy: " + avg_acc + "%");
+        print("  Samples: " + epoch_samples);
+        
+        // Save checkpoint if best loss
+        if (avg_loss < best_loss) {
+            best_loss = avg_loss;
+            model.save_checkpoint(epoch + 1, avg_loss, "best_model.ckpt");
+        }
+        
+        // Save periodic checkpoint
+        if ((epoch + 1) % save_interval == 0) {
+            model.save_checkpoint(epoch + 1, avg_loss, "epoch_" + (epoch + 1) + ".ckpt");
+        }
+        
+        print("");
+        epoch = epoch + 1;
+    }
+    
+    print("=============================");
+    print("Training Complete!");
+    print("Best Loss: " + best_loss);
+    print("=============================");
+    
+    // Save final model weights
+    var params = model.parameters();
+    model_save(params[0], params[1], params[2], params[3], params[4], params[5],
+               params[6], params[7], params[8], params[9], params[10], "lenet_mnist.ncta");
+    print("Model saved to: lenet_mnist.ncta");
+}
+
+run_training();
+print("Done.");

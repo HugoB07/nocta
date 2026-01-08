@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(nocta VERSION 0.5.0 LANGUAGES C)
+project(nocta VERSION 0.6.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -83,6 +83,13 @@ set(NOCTA_SOURCES
     src/optim/optimizer.c
     src/optim/sgd.c
     src/optim/adam.c
+    src/lang/lexer.c
+    src/lang/parser.c
+    src/lang/chunk.c
+    src/lang/compiler.c
+    src/lang/vm.c
+    src/lang/object.c
+    src/lang/value.c
 )
 
 # CUDA sources
@@ -154,6 +161,13 @@ if(NOCTA_BUILD_EXAMPLES)
 endif()
 
 # ============================================
+# Main Executable (CLI)
+# ============================================
+add_executable(nocta_cli src/main.c)
+set_target_properties(nocta_cli PROPERTIES OUTPUT_NAME "nocta_cli")
+target_link_libraries(nocta_cli PRIVATE nocta)
+
+# ============================================
 # Testing
 # ============================================
 enable_testing()
@@ -167,6 +181,15 @@ add_executable(unit_tests
     tests/test_optim.c
     tests/test_io.c
     tests/test_reduction.c
+    tests/test_lexer.c
+    tests/test_parser.c
+    tests/test_chunk.c
+    tests/test_compiler.c
+    tests/test_vm.c
+    tests/test_flow.c
+    tests/test_func.c
+    tests/test_native.c
+    tests/test_loop.c
 )
 
 target_link_libraries(unit_tests PRIVATE nocta)
@@ -178,3 +201,12 @@ add_test(NAME NeuralNet COMMAND unit_tests nn)
 add_test(NAME Optimizers COMMAND unit_tests optim)
 add_test(NAME IO COMMAND unit_tests io)
 add_test(NAME Reductions COMMAND unit_tests reduction)
+add_test(NAME Lexer COMMAND unit_tests lexer)
+add_test(NAME Parser COMMAND unit_tests parser)
+add_test(NAME Chunk COMMAND unit_tests chunk)
+add_test(NAME Compiler COMMAND unit_tests compiler)
+add_test(NAME VM COMMAND unit_tests vm)
+add_test(NAME Native COMMAND unit_tests native)
+add_test(NAME Flow COMMAND unit_tests flow)
+add_test(NAME Func COMMAND unit_tests func)
+add_test(NAME Loop COMMAND unit_tests loop)

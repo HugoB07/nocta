@@ -40,4 +40,9 @@ nc_optimizer* nc_adam_default(nc_module* m, double lr);
 // AdamW (Adam with decoupled weight decay)
 nc_optimizer* nc_adamw(nc_module* m, double lr, double weight_decay);
 
+// Functional API: Single tensor step
+void nc_adam_step_single(nc_tensor* param, nc_tensor* grad, 
+                        nc_tensor* m, nc_tensor* v, nc_tensor* v_max, 
+                        nc_adam_config* config, double lr, int t);
+
 #endif // NOCTA_ADAM_H

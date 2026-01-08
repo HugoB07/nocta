@@ -24,7 +24,7 @@ nc_tensor* nc_outer(nc_tensor* a, nc_tensor* b);
 nc_tensor* nc_mv(nc_tensor* mat, nc_tensor* vec);
 
 // Vector-matrix multiply: x @ A
-nc_tensor* nc_vm(nc_tensor* vec, nc_tensor* mat);
+nc_tensor* nc_vec_mat(nc_tensor* vec, nc_tensor* mat);
 
 // Add matrix multiply: C = alpha * A @ B + beta * C
 nc_tensor* nc_addmm(nc_tensor* c, nc_tensor* a, nc_tensor* b, 

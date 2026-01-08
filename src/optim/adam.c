@@ -129,3 +129,61 @@ nc_optimizer* nc_adamw(nc_module* m, double lr, double weight_decay) {
     cfg.weight_decay = weight_decay;
     return nc_adam_from_module(m, lr, cfg);
 }
+
+void nc_adam_step_single(nc_tensor* param, nc_tensor* grad, 
+                        nc_tensor* m, nc_tensor* v, nc_tensor* v_max, 
+                        nc_adam_config* cfg, double lr, int t) {
+    if (!param || !grad || !m || !v) return;
+    
+    // Bias correction factors
+    double bias_corr1 = 1.0 - pow(cfg->beta1, (double)t);
+    double bias_corr2 = 1.0 - pow(cfg->beta2, (double)t);
+    
+    // Ensure data exists
+    float* p_data = (float*)nc_tensor_data(param);
+    float* g_data = (float*)nc_tensor_data(grad);
+    float* m_data = (float*)nc_tensor_data(m);
+    float* v_data = (float*)nc_tensor_data(v);
+    float* vm_data = v_max ? (float*)nc_tensor_data(v_max) : NULL;
+    
+    if (!p_data || !g_data || !m_data || !v_data) return;
+    
+    size_t n = param->numel;
+    
+    // TODO: parallelize with OpenMP
+    for (size_t j = 0; j < n; j++) {
+        float g = g_data[j];
+        float p = p_data[j];
+        
+        // Weight decay (AdamW)
+        if (cfg->weight_decay != 0.0) {
+            p = (float)(p - lr * cfg->weight_decay * p);
+        }
+        
+        // Update m
+        float mj = m_data[j];
+        mj = (float)(cfg->beta1 * mj + (1.0 - cfg->beta1) * g);
+        m_data[j] = mj;
+        
+        // Update v
+        float vj = v_data[j];
+        vj = (float)(cfg->beta2 * vj + (1.0 - cfg->beta2) * g * g);
+        v_data[j] = vj;
+        
+        // Bias correction
+        double m_hat = mj / bias_corr1;
+        double v_hat = vj / bias_corr2;
+        
+        // AMSGrad
+        if (cfg->amsgrad && vm_data) {
+            float v_max_j = vm_data[j];
+            v_max_j = (float)fmax(v_max_j, v_hat);
+            vm_data[j] = v_max_j;
+            v_hat = v_max_j;
+        }
+        
+        // Update param
+        p = (float)(p - lr * m_hat / (sqrt(v_hat) + cfg->eps));
+        p_data[j] = p;
+    }
+}

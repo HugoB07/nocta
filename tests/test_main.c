@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include "minunit.h"
 #include "nocta/nocta.h"
 
@@ -15,6 +16,15 @@ extern char* test_nn_suite();
 extern char* test_optim_suite();
 extern char* test_io_suite();
 extern char* test_reduction_suite();
+extern char* test_lexer_suite();
+extern char* test_parser_suite();
+extern char* test_chunk_suite();
+extern char* test_compiler_suite();
+extern char* test_vm_suite();
+extern char* test_native_suite();
+extern char* test_flow_suite();
+extern char* test_func_suite();
+extern char* test_loop_suite();
 
 void run_suite(const char* name, char* (*suite_func)()) {
     printf("\n--- %s Tests ---\n", name);
@@ -38,6 +48,15 @@ int main(int argc, char **argv) {
         run_suite("Optim", test_optim_suite);
         run_suite("IO", test_io_suite);
         run_suite("Reduction", test_reduction_suite);
+        run_suite("Lexer", test_lexer_suite);
+        run_suite("Parser", test_parser_suite);
+        run_suite("Chunk", test_chunk_suite);
+        run_suite("Compiler", test_compiler_suite);
+        run_suite("VM", test_vm_suite);
+        run_suite("Native", test_native_suite);
+        run_suite("Flow", test_flow_suite);
+        run_suite("Func", test_func_suite);
+        run_suite("Loop", test_loop_suite);
     } 
     else if (strcmp(argv[1], "tensor") == 0) {
         run_suite("Tensor", test_tensor_suite);
@@ -59,6 +78,33 @@ int main(int argc, char **argv) {
     }
     else if (strcmp(argv[1], "reduction") == 0) {
         run_suite("Reduction", test_reduction_suite);
+    }
+    else if (strcmp(argv[1], "lexer") == 0) {
+        run_suite("Lexer", test_lexer_suite);
+    }
+    else if (strcmp(argv[1], "parser") == 0) {
+        run_suite("Parser", test_parser_suite);
+    }
+    else if (strcmp(argv[1], "chunk") == 0) {
+        run_suite("Chunk", test_chunk_suite);
+    }
+    else if (strcmp(argv[1], "compiler") == 0) {
+        run_suite("Compiler", test_compiler_suite);
+    }
+    else if (strcmp(argv[1], "vm") == 0) {
+        run_suite("VM", test_vm_suite);
+    }
+    else if (strcmp(argv[1], "native") == 0) {
+        run_suite("Native", test_native_suite);
+    }
+    else if (strcmp(argv[1], "flow") == 0) {
+        run_suite("Flow", test_flow_suite);
+    }
+    else if (strcmp(argv[1], "func") == 0) {
+        run_suite("Func", test_func_suite);
+    }
+    else if (strcmp(argv[1], "loop") == 0) {
+        run_suite("Loop", test_loop_suite);
     }
     else {
         printf("Unknown suite: %s\n", argv[1]);

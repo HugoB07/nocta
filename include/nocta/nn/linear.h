@@ -19,6 +19,9 @@ nc_tensor* nc_linear_weight(nc_module* linear);
 // Get bias tensor from linear module
 nc_tensor* nc_linear_bias(nc_module* linear);
 
+// Functional API: y = x @ W^T + b
+nc_tensor* nc_linear_forward(nc_tensor* input, nc_tensor* weight, nc_tensor* bias);
+
 // ============================================
 // Weight initialization
 // ============================================

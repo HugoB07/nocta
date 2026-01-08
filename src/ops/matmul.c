@@ -649,7 +649,7 @@ nc_tensor* nc_mv(nc_tensor* mat, nc_tensor* vec) {
     return matmul_mv(mat, vec);
 }
 
-nc_tensor* nc_vm(nc_tensor* vec, nc_tensor* mat) {
+nc_tensor* nc_vec_mat(nc_tensor* vec, nc_tensor* mat) {
     return matmul_vm(vec, mat);
 }
 
